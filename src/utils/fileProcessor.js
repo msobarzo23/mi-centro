@@ -77,11 +77,22 @@ export async function processCobranzasFile(file) {
 // AGING Y MÉTRICAS DE COBRANZA
 // ══════════════════════════════════════════════════════════════════════
 
+// Umbral (en días) a partir del cual una factura se considera "crítica" — requiere
+// cobranza especial y NO cuenta como ingreso esperado automático.
+export const UMBRAL_FACTURA_CRITICA_DIAS = 180;
+
 // Genera objeto por cliente con:
-//   - facturas pendientes (no cobradas completamente)
+//   - facturas pendientes (no cobradas completamente) vía FIFO real
 //   - pagos ya recibidos
 //   - DSO real (si hay histórico de pagos)
-//   - aging buckets
+//   - aging buckets incluyendo "críticas" (>180 días vencidas)
+//
+// Nota importante sobre el FIFO:
+// El archivo Defontana NO trae un "saldo por factura" confiable — la columna `Saldo`
+// es trivialmente `Cargo - Abono` de esa fila. Entonces distribuimos el saldo neto
+// del cliente entre sus cargos (facturas + APERTURAs) asumiendo FIFO: los pagos
+// se aplican primero a los cargos más antiguos. Esto deja las facturas más recientes
+// como pendientes, que es el comportamiento correcto para cobranza.
 export function computeCobranzas(procesado, todayRef = null) {
   if (!procesado || !procesado.movimientos) return null;
   const today = todayRef || procesado.fechaInforme || todayMidnight();
@@ -109,22 +120,26 @@ export function computeCobranzas(procesado, todayRef = null) {
   Object.values(porCliente).forEach(c => {
     c.saldoPendiente = c.totalCargo - c.totalAbono;
 
-    // Facturas individuales (tipos de Venta + APERTURA con cargo)
-    const facturas = c.movimientos
+    // CARGOS = cualquier fila con cargo > 0 y tipo != INGRESO (incluye Vta_* y APERTURA)
+    //   Las APERTURAs representan saldos iniciales al migrar al ERP — son "facturas"
+    //   históricas que siguen vigentes en el libro mayor.
+    const cargos = c.movimientos
       .filter(m => m.cargo > 0 && m.tipo !== "INGRESO")
-      .map(m => ({ ...m, tipoFila: "factura" }));
+      .sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
 
-    // Pagos / abonos (INGRESO con abono > 0 o abonos en movimientos)
+    // ABONOS NETOS = todos los abonos - los cargos de filas tipo INGRESO (reversiones)
+    const abonosTotal = c.movimientos.filter(m => m.abono > 0).reduce((s, m) => s + m.abono, 0);
+    const cargosIngreso = c.movimientos.filter(m => m.tipo === "INGRESO" && m.cargo > 0).reduce((s, m) => s + m.cargo, 0);
+    const abonosNetos = abonosTotal - cargosIngreso;
+
+    // ─── Cálculo de DSO real (matchea pagos con facturas) ───
+    // Mantiene lógica anterior: matcheo por numeroDocPago
     const pagos = c.movimientos.filter(m => m.abono > 0);
-
-    // Matchear pago con factura por numeroDocPago o numeroDoc
-    // Esto es importante para calcular DSO real
     const dsoSamples = [];
     pagos.forEach(pago => {
-      // Intentar matchear por Número Doc Pago contra Número Doc de factura
       let facturaMatch = null;
       if (pago.numeroDocPago) {
-        facturaMatch = facturas.find(f =>
+        facturaMatch = cargos.find(f =>
           String(f.numeroDoc).trim() === String(pago.numeroDocPago).trim() ||
           String(f.numero).trim() === String(pago.numeroDocPago).trim()
         );
@@ -136,8 +151,6 @@ export function computeCobranzas(procesado, todayRef = null) {
         }
       }
     });
-
-    // DSO promedio ponderado por monto cobrado
     if (dsoSamples.length > 0) {
       const totMonto = dsoSamples.reduce((s, x) => s + x.monto, 0);
       c.dsoReal = totMonto > 0
@@ -149,56 +162,47 @@ export function computeCobranzas(procesado, todayRef = null) {
       c.dsoMuestras = 0;
     }
 
-    c.facturasCount = facturas.length;
+    c.facturasCount = cargos.length;
     c.pagosCount = pagos.length;
 
-    // Facturas pendientes = todas las facturas menos los montos pagados
-    // Para un aging simple: usar el saldo de cada factura pendiente por fecha de vencimiento
-    // Asumimos FIFO: las facturas más antiguas se pagan primero
-    let saldoRestante = c.saldoPendiente;
-    const facturasOrdenadas = [...facturas].sort((a, b) =>
-      (a.vencimiento || a.fecha) - (b.vencimiento || b.fecha)
-    );
-    // Buscamos asignar el saldoPendiente "hacia atrás" a las facturas más recientes
-    // (las más antiguas ya se pagaron). Pero también conservamos las facturas que
-    // figuran directamente con saldo > 0 en la fila (las aperturas).
+    // ─── FIFO: aplicar abonosNetos a cargos ordenados ascendente por fecha ───
     c.facturasPendientes = [];
-    // Método A: Si el archivo trae columna Saldo por fila, respetar ese valor
-    //   (Defontana lo pone así cuando filtras por estado "Pendiente")
-    const facturasConSaldoPositivo = facturas.filter(f => f.saldo > 0);
-    if (facturasConSaldoPositivo.length > 0) {
-      facturasConSaldoPositivo.forEach(f => {
-        c.facturasPendientes.push({
-          folio: f.numero,
-          fecha: f.fecha,
-          vencimiento: f.vencimiento || estimarVencimiento(f.fecha, c.nombre),
-          monto: f.saldo,
-          documento: f.documento,
-          diasAtraso: f.vencimiento ? daysBetween(f.vencimiento, today) : null,
-          tipo: f.tipo,
-        });
-      });
-    } else {
-      // Método B: asignar el saldo a las facturas más recientes hacia atrás
-      const desc = [...facturas].sort((a, b) => b.fecha - a.fecha);
-      let rem = c.saldoPendiente;
-      for (const f of desc) {
-        if (rem <= 0) break;
-        const montoAsignado = Math.min(f.cargo, rem);
-        if (montoAsignado > 0) {
-          c.facturasPendientes.push({
-            folio: f.numero,
-            fecha: f.fecha,
-            vencimiento: f.vencimiento || estimarVencimiento(f.fecha, c.nombre),
-            monto: montoAsignado,
-            documento: f.documento,
-            diasAtraso: f.vencimiento ? daysBetween(f.vencimiento, today) : null,
-            tipo: f.tipo,
-          });
-          rem -= montoAsignado;
-        }
+    c.facturasCriticas = [];  // >180 días vencidas (no cuentan para ingresos esperados)
+    c.facturasCobrables = []; // ≤180 días o por vencer (sí cuentan)
+
+    if (c.saldoPendiente <= 0.01) return; // sin deuda neta, no hay pendientes
+
+    let rem = Math.max(0, abonosNetos);
+    for (const f of cargos) {
+      if (rem >= f.cargo) {
+        rem -= f.cargo;
+        continue; // factura completamente pagada
       }
+      const saldoF = f.cargo - rem;
+      rem = 0;
+      const venc = f.vencimiento || estimarVencimiento(f.fecha, c.nombre);
+      const diasAtraso = venc ? daysBetween(venc, today) : null;
+      const critica = diasAtraso != null && diasAtraso > UMBRAL_FACTURA_CRITICA_DIAS;
+
+      const fact = {
+        folio: f.numero,
+        fecha: f.fecha,
+        vencimiento: venc,
+        monto: saldoF,
+        documento: f.documento,
+        diasAtraso,
+        tipo: f.tipo,
+        esApertura: f.tipo === "APERTURA",
+        critica,
+      };
+      c.facturasPendientes.push(fact);
+      if (critica) c.facturasCriticas.push(fact);
+      else c.facturasCobrables.push(fact);
     }
+
+    // Métricas por cliente para dashboards
+    c.montoCriticas = c.facturasCriticas.reduce((s, f) => s + f.monto, 0);
+    c.montoCobrables = c.facturasCobrables.reduce((s, f) => s + f.monto, 0);
   });
 
   // Global: aging buckets y totales
@@ -212,24 +216,36 @@ export function computeCobranzas(procesado, todayRef = null) {
     vencidas_0_30: { count: 0, monto: 0, facturas: [] },
     vencidas_31_60: { count: 0, monto: 0, facturas: [] },
     vencidas_61_90: { count: 0, monto: 0, facturas: [] },
-    vencidas_90plus: { count: 0, monto: 0, facturas: [] },
+    vencidas_91_180: { count: 0, monto: 0, facturas: [] },
+    vencidas_critica: { count: 0, monto: 0, facturas: [] }, // > 180 días (cobranza especial)
   };
 
   todasFacturasPendientes.forEach(f => {
     const d = f.diasAtraso;
     let bucket;
     if (d == null) bucket = "porVencer";
-    else if (d < 0) bucket = "porVencer";
+    else if (d <= 0) bucket = "porVencer";
     else if (d <= 30) bucket = "vencidas_0_30";
     else if (d <= 60) bucket = "vencidas_31_60";
     else if (d <= 90) bucket = "vencidas_61_90";
-    else bucket = "vencidas_90plus";
+    else if (d <= UMBRAL_FACTURA_CRITICA_DIAS) bucket = "vencidas_91_180";
+    else bucket = "vencidas_critica";
     aging[bucket].count++;
     aging[bucket].monto += f.monto;
     aging[bucket].facturas.push(f);
   });
 
   const totalPendiente = Object.values(porCliente).reduce((s, c) => s + c.saldoPendiente, 0);
+  // Total cobrable = todo lo pendiente excluyendo las facturas críticas (>180 días)
+  const totalCobrable = aging.porVencer.monto + aging.vencidas_0_30.monto +
+                        aging.vencidas_31_60.monto + aging.vencidas_61_90.monto +
+                        aging.vencidas_91_180.monto;
+  const totalCritico = aging.vencidas_critica.monto;
+  // Total vencido = cualquier factura con días de atraso > 0 (incluye críticas)
+  const totalVencido = aging.vencidas_0_30.monto + aging.vencidas_31_60.monto +
+                       aging.vencidas_61_90.monto + aging.vencidas_91_180.monto +
+                       aging.vencidas_critica.monto;
+
   const clientesArray = Object.values(porCliente)
     .filter(c => Math.abs(c.saldoPendiente) > 0.01)
     .sort((a, b) => b.saldoPendiente - a.saldoPendiente);
@@ -249,6 +265,9 @@ export function computeCobranzas(procesado, todayRef = null) {
     clientesArray,
     aging,
     totalPendiente,
+    totalCobrable,    // NUEVO: excluye facturas >180 días
+    totalCritico,     // NUEVO: solo facturas >180 días (gestión especial)
+    totalVencido,     // NUEVO: cualquier factura con atraso > 0
     dsoGlobal,
     totalFacturasPendientes: todasFacturasPendientes.length,
     fechaInforme: today,
@@ -269,6 +288,8 @@ export function estimarVencimiento(fechaFactura, nombreCliente) {
 
 // ══════════════════════════════════════════════════════════════════════
 // PROYECCIÓN DE COBRANZA — cuánto voy a cobrar cada semana los próx 90 días
+// IMPORTANTE: Excluye facturas "críticas" (>180 días vencidas). Esas requieren
+// cobranza especial y no son ingresos esperados automáticos.
 // ══════════════════════════════════════════════════════════════════════
 export function buildCobranzaProyectada(cobranzas, today) {
   if (!cobranzas) return [];
@@ -283,9 +304,11 @@ export function buildCobranzaProyectada(cobranzas, today) {
     fin.setHours(23, 59, 59, 999);
     buckets.push({ semana: w, inicio, fin, facturas: [], monto: 0, label: `${inicio.getDate()}/${inicio.getMonth()+1} — ${fin.getDate()}/${fin.getMonth()+1}` });
   }
-  // Distribuir cada factura pendiente en la semana correspondiente a su vencimiento
+  // Distribuir cada factura pendiente COBRABLE en la semana correspondiente a su vencimiento
+  // Críticas (>180 días) NO se incluyen — son cobranza especial.
   Object.values(cobranzas.porCliente || {}).forEach(c => {
     c.facturasPendientes.forEach(f => {
+      if (f.critica) return; // skip: no es ingreso esperado automático
       const venc = f.vencimiento;
       if (!venc) return;
       for (const b of buckets) {
@@ -297,15 +320,21 @@ export function buildCobranzaProyectada(cobranzas, today) {
       }
     });
   });
-  // Vencidas antes de hoy → bucket "ya vencidas"
+  // Vencidas antes de hoy (pero no críticas) → bucket "ya vencidas, gestionables"
   const vencidas = { monto: 0, facturas: [] };
+  // Críticas separadas → NO cuentan como ingreso esperado, pero las devolvemos
+  // para mostrar el saldo aparte en dashboards
+  const criticas = { monto: 0, facturas: [] };
   Object.values(cobranzas.porCliente || {}).forEach(c => {
     c.facturasPendientes.forEach(f => {
-      if (f.vencimiento && f.vencimiento < ref) {
+      if (f.critica) {
+        criticas.monto += f.monto;
+        criticas.facturas.push({ ...f, cliente: c.nombre });
+      } else if (f.vencimiento && f.vencimiento < ref) {
         vencidas.monto += f.monto;
         vencidas.facturas.push({ ...f, cliente: c.nombre });
       }
     });
   });
-  return { buckets, vencidas };
+  return { buckets, vencidas, criticas };
 }
