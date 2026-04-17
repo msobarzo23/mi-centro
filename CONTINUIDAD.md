@@ -4,6 +4,71 @@
 
 ---
 
+## 🔧 Cambios en v1.1 (17 abril 2026, tarde)
+
+Bugs críticos encontrados por Miguel al primer deploy y corregidos:
+
+### Bug 1: FIFO mal distribuía el saldo de cobranzas
+
+**Síntoma:** Cockpit mostraba "Cuánto deberíamos recibir: $27.617M" cuando el archivo real sumaba $7.859M. Tab "Por cobrar" mostraba 599 facturas pendientes y total vencido $18.937M (240% del total, imposible).
+
+**Causa:** El código usaba la columna `Saldo ($)` del archivo Defontana como si fuera el saldo residual de cada factura. Pero esa columna es trivialmente `Cargo - Abono` de cada fila, no un saldo acumulado. Entonces filas con `Saldo > 0` = TODOS los cargos (facturas + aperturas). Resultado: sumaba $23.708M en vez de los $7.859M reales.
+
+**Arreglo:** Reescribir `computeCobranzas` en `fileProcessor.js` con FIFO correcto:
+- Todos los `cargo > 0 && tipo !== INGRESO` = facturas/aperturas ordenadas ascendente por fecha.
+- `abonosNetos = sum(abonos) - sum(cargos de filas tipo INGRESO)` (las filas INGRESO con cargo son reversiones de pagos).
+- Aplicar `abonosNetos` FIFO a los cargos: las más antiguas se saldan primero; las que quedan pendientes se acumulan desde la más antigua no-saldada en adelante.
+- Cada factura pendiente trae un flag `critica: true` si tiene más de 180 días vencida.
+
+### Bug 2: Facturas muy antiguas contaban como ingreso esperado
+
+**Síntoma:** Miguel dijo: "facturas que tengan vencimiento mayor a 6 meses no la uses para lo que recibiremos, porque hay que hacer cobranza y por algo no se ha pagado."
+
+**Caso real:** SQM Industrial tenía $679M en 15 facturas de 2022-2023 que aparecían como "ingreso esperado" en el flujo 90d. Mantoverde y SQM Salar también tenían carteras antiguas de cobranza especial.
+
+**Arreglo:**
+- Constante `UMBRAL_FACTURA_CRITICA_DIAS = 180` en `fileProcessor.js`.
+- Cada factura pendiente trae `critica: true/false`.
+- `buildCobranzaProyectada` y `cobranzaPorVentana` en `useCompute.js` excluyen facturas críticas.
+- `FlujoCaja.jsx` las omite del flujo proyectado.
+- `Cobranzas.jsx` las muestra en bucket separado `+180 días` (color violeta, marcadas "Cobranza especial") con nota explicativa.
+
+### Datos reales del archivo de Miguel (17-abr-2026) tras el fix
+
+| Métrica | Valor |
+|---|---|
+| Total por cobrar | $7.882M (226 facturas, 46 clientes) |
+| Cobrable real (≤180 días) | **$6.562M** ← lo que va a pregunta 3 |
+| Crítico (+180 días) | $1.320M (15 facturas SQM 2022-2023 + otras) |
+| Total vencido (>0 días) | $3.143M |
+
+### Estructura nueva de `cobranzas` objeto
+
+```js
+{
+  porCliente: { "SQM...": { saldoPendiente, facturasPendientes[], facturasCriticas[], facturasCobrables[], montoCriticas, montoCobrables, ... } },
+  aging: {
+    porVencer, vencidas_0_30, vencidas_31_60, vencidas_61_90,
+    vencidas_91_180,       // NUEVO: entre 91 y 180 días
+    vencidas_critica,      // NUEVO: >180 días (antes "vencidas_90plus")
+  },
+  totalPendiente,   // mismo de antes
+  totalCobrable,    // NUEVO: excluye críticas
+  totalCritico,     // NUEVO: solo >180 días
+  totalVencido,     // NUEVO: cualquier atraso > 0
+  ...
+}
+```
+
+Cada `factura pendiente` ahora incluye:
+```js
+{ folio, fecha, vencimiento, monto, documento, diasAtraso, tipo, esApertura, critica }
+```
+
+En `useCompute.js`, el nuevo `cobranzaPorVentana.criticas` contiene las facturas críticas separadas (no se suman a `cobranzaEsperada30/60/90`).
+
+---
+
 ## Contexto
 
 **Miguel Sobarzo** — Gerente de Finanzas en Transportes Bello e Hijos Ltda. (Chile).
