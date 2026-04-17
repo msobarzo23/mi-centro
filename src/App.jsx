@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import {
-  LayoutDashboard, TrendingUp, Receipt, Truck,
+  LayoutDashboard, TrendingUp, Receipt, Truck, Users,
   Moon, Sun, RefreshCw, AlertCircle, Loader2,
 } from "lucide-react";
 import { PasswordGate } from "./components/PasswordGate.jsx";
@@ -10,6 +10,7 @@ import { Cockpit } from "./tabs/Cockpit.jsx";
 import { FlujoCaja } from "./tabs/FlujoCaja.jsx";
 import { Cobranzas } from "./tabs/Cobranzas.jsx";
 import { CicloViajes } from "./tabs/CicloViajes.jsx";
+import Clientes360 from "./tabs/Clientes360.jsx";
 import { fmtDateMed } from "./utils/format.js";
 
 const TABS = [
@@ -17,6 +18,7 @@ const TABS = [
   { id: "flujo", label: "Flujo 90d", icon: TrendingUp, color: "var(--green)" },
   { id: "cobranzas", label: "Por cobrar", icon: Receipt, color: "var(--violet)" },
   { id: "ciclo", label: "Ciclo viajes", icon: Truck, color: "var(--teal)" },
+  { id: "clientes360", label: "Clientes 360", icon: Users, color: "var(--accent)" },
 ];
 
 function AppInner() {
@@ -106,6 +108,13 @@ function AppInner() {
         />;
       case "ciclo":
         return <CicloViajes C={C} cobranzas={data.cobranzas} sheets={data.sheets} />;
+      case "clientes360":
+        return <Clientes360
+          cobranzas={data.cobranzas}
+          rawRows={data.cobranzasRaw?.movimientos || []}
+          viajes={null}
+          hoy={data.cobranzasRaw?.fechaInforme || new Date()}
+        />;
       default:
         return null;
     }
