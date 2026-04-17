@@ -191,17 +191,21 @@ export function useCompute(sheets, cobranzas) {
     const faltaFacturarMesActual = Math.max(0, proyFacturacionMesActual - totalFacturadoMesActual);
 
     // 3.b ─ Cobranza de facturas pendientes (del archivo subido)
-    //       Se agrupa por ventana temporal
+    //       Se agrupa por ventana temporal. EXCLUYE facturas críticas (>180 días
+    //       vencidas) — requieren cobranza especial y no son ingresos esperados.
     const cobranzaPorVentana = {
-      vencidas: { monto: 0, count: 0 },
+      vencidas: { monto: 0, count: 0 },    // vencidas 1-180 días (gestionables)
       prox30: { monto: 0, count: 0 },
       prox60: { monto: 0, count: 0 },
       prox90: { monto: 0, count: 0 },
       masAlla: { monto: 0, count: 0 },
+      criticas: { monto: 0, count: 0 },    // NUEVO: >180 días, NO suman a ingreso esperado
     };
     if (cobranzas) {
       Object.values(cobranzas.porCliente).forEach(c => {
         c.facturasPendientes.forEach(f => {
+          // Críticas (>180 días vencidas) no van a ninguna ventana de ingreso esperado
+          if (f.critica) { cobranzaPorVentana.criticas.monto += f.monto; cobranzaPorVentana.criticas.count++; return; }
           const v = f.vencimiento;
           if (!v) { cobranzaPorVentana.prox30.monto += f.monto; cobranzaPorVentana.prox30.count++; return; }
           if (v < today) { cobranzaPorVentana.vencidas.monto += f.monto; cobranzaPorVentana.vencidas.count++; }
