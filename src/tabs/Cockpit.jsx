@@ -103,7 +103,7 @@ export function Cockpit({ C, cobranzas, cobranzasRaw, uploadCobranzas, clearCobr
             question="¿Cuánto deberíamos recibir?"
             answer={cobranzas ? fmtM(porRecibir90) : "—"}
             sub={cobranzas
-              ? `Próximos 90 días: ${fmtM(C.cobranzaEsperada30)} en 30d, ${fmtM(C.cobranzaEsperada60)} en 60d`
+              ? `Próximos 90 días: ${fmtM(C.cobranzaEsperada30)} en 30d, ${fmtM(C.cobranzaEsperada60)} en 60d${cobranzas.totalCritico > 0 ? ` · Excluye ${fmtM(cobranzas.totalCritico)} en facturas +180d` : ""}`
               : "Requiere el archivo de cobranzas"
             }
             color="var(--accent)"

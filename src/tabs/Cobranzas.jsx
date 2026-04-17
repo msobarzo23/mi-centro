@@ -76,8 +76,8 @@ export function Cobranzas({ cobranzas, cobranzasRaw, uploadCobranzas, clearCobra
   }, [cobranzas, query, sortBy]);
 
   const aging = cobranzas.aging;
-  const totalVencido = aging.vencidas_0_30.monto + aging.vencidas_31_60.monto + aging.vencidas_61_90.monto + aging.vencidas_90plus.monto;
-  const totalVencidoCount = aging.vencidas_0_30.count + aging.vencidas_31_60.count + aging.vencidas_61_90.count + aging.vencidas_90plus.count;
+  const totalVencido = cobranzas.totalVencido;
+  const totalVencidoCount = aging.vencidas_0_30.count + aging.vencidas_31_60.count + aging.vencidas_61_90.count + aging.vencidas_91_180.count + aging.vencidas_critica.count;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -106,13 +106,21 @@ export function Cobranzas({ cobranzas, cobranzasRaw, uploadCobranzas, clearCobra
           highlight
         />
         <KpiCard
+          icon={CheckCircle2}
+          label="Cobrable real"
+          value={fmtM(cobranzas.totalCobrable)}
+          sub={`Excluye ${fmtM(cobranzas.totalCritico)} con +180 días (cobranza especial)`}
+          color="var(--green)"
+          colorBg="var(--green-bg)"
+          highlight
+        />
+        <KpiCard
           icon={AlertTriangle}
           label="Total vencido"
           value={fmtM(totalVencido)}
           sub={`${totalVencidoCount} facturas · ${cobranzas.totalPendiente > 0 ? fmtPctNoSign(totalVencido / cobranzas.totalPendiente * 100) : "0%"} del total`}
           color={totalVencido > cobranzas.totalPendiente * 0.2 ? "var(--red)" : "var(--amber)"}
           colorBg={totalVencido > cobranzas.totalPendiente * 0.2 ? "var(--red-bg)" : "var(--amber-bg)"}
-          highlight
         />
         <KpiCard
           icon={Clock}
@@ -121,14 +129,6 @@ export function Cobranzas({ cobranzas, cobranzasRaw, uploadCobranzas, clearCobra
           sub={cobranzas.dsoGlobal ? (cobranzas.dsoGlobal <= 35 ? "Dentro de rango" : cobranzas.dsoGlobal <= 50 ? "Elevado" : "Crítico") : "Sin historial"}
           color={!cobranzas.dsoGlobal ? "var(--tx-muted)" : cobranzas.dsoGlobal <= 35 ? "var(--green)" : cobranzas.dsoGlobal <= 50 ? "var(--amber)" : "var(--red)"}
           colorBg={!cobranzas.dsoGlobal ? "var(--bg-surface-3)" : cobranzas.dsoGlobal <= 35 ? "var(--green-bg)" : cobranzas.dsoGlobal <= 50 ? "var(--amber-bg)" : "var(--red-bg)"}
-        />
-        <KpiCard
-          icon={TrendingDown}
-          label="+90 días vencidas"
-          value={fmtM(aging.vencidas_90plus.monto)}
-          sub={`${aging.vencidas_90plus.count} facturas críticas`}
-          color={aging.vencidas_90plus.monto > 0 ? "var(--red)" : "var(--green)"}
-          colorBg={aging.vencidas_90plus.monto > 0 ? "var(--red-bg)" : "var(--green-bg)"}
         />
       </div>
 
@@ -139,7 +139,7 @@ export function Cobranzas({ cobranzas, cobranzasRaw, uploadCobranzas, clearCobra
         icon={Calendar}
         color="var(--accent)"
       >
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
           <AgingBucket
             label="Por vencer"
             count={aging.porVencer.count}
@@ -173,15 +173,35 @@ export function Cobranzas({ cobranzas, cobranzasRaw, uploadCobranzas, clearCobra
             description="Gestión urgente"
           />
           <AgingBucket
-            label="+90 días"
-            count={aging.vencidas_90plus.count}
-            monto={aging.vencidas_90plus.monto}
+            label="91 — 180 días"
+            count={aging.vencidas_91_180.count}
+            monto={aging.vencidas_91_180.monto}
             total={cobranzas.totalPendiente}
             color="var(--red)"
             description="Riesgo alto"
             critical
           />
+          <AgingBucket
+            label="+180 días"
+            count={aging.vencidas_critica.count}
+            monto={aging.vencidas_critica.monto}
+            total={cobranzas.totalPendiente}
+            color="var(--violet)"
+            description="Cobranza especial"
+            critical
+          />
         </div>
+        {aging.vencidas_critica.monto > 0 && (
+          <div style={{
+            marginTop: 14, padding: "12px 14px",
+            background: "var(--violet-bg)",
+            border: "1px solid var(--violet)",
+            borderRadius: 10,
+            fontSize: 11.5, color: "var(--tx)", lineHeight: 1.5,
+          }}>
+            <strong>Nota sobre +180 días:</strong> {fmtM(aging.vencidas_critica.monto)} en {aging.vencidas_critica.count} facturas con más de 6 meses de atraso. Estas facturas <strong>no se incluyen</strong> en la proyección de cobranza esperada del Cockpit — por su antigüedad requieren gestión especial y no son ingresos automáticos. Revísalas manualmente para decidir provisión, cobranza judicial o castigo.
+          </div>
+        )}
       </SectionCard>
 
       {/* Filtros y tabla de clientes */}

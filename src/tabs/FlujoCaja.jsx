@@ -232,11 +232,12 @@ function buildFlujo(C, cobranzas) {
     }
   });
 
-  // INGRESOS: (1) Facturas pendientes del archivo
+  // INGRESOS: (1) Facturas pendientes del archivo (excluye facturas críticas >180d)
   let totalCobranzasExistentes = 0;
   if (cobranzas) {
     Object.values(cobranzas.porCliente).forEach(c => {
       c.facturasPendientes.forEach(f => {
+        if (f.critica) return; // Facturas >180d no son ingreso esperado automático
         if (!f.vencimiento) return;
         // Si ya venció, ponerla en la semana 1 (asumimos se cobra pronto, pero en realidad deberíamos destacar que está vencida)
         let targetDate = f.vencimiento;
