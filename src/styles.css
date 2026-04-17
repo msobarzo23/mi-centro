@@ -1,0 +1,158 @@
+:root {
+  /* Dark theme (default) - editorial/finance inspired */
+  --bg: #0a0a0a;
+  --bg-surface: #131313;
+  --bg-surface-2: #1a1a1a;
+  --bg-surface-3: #242424;
+  --bg-elevated: #1e1e1e;
+  --border: #2a2a2a;
+  --border-strong: #3a3a3a;
+
+  --tx: #f5f0e6;
+  --tx-muted: #a8a29e;
+  --tx-dim: #78716c;
+  --tx-faint: #52504c;
+
+  --accent: #d97706;
+  --accent-bright: #f59e0b;
+  --accent-bg: rgba(217, 119, 6, 0.08);
+  --accent-border: rgba(217, 119, 6, 0.25);
+
+  --green: #22c55e;
+  --green-bg: rgba(34, 197, 94, 0.1);
+  --green-border: rgba(34, 197, 94, 0.25);
+
+  --red: #ef4444;
+  --red-bg: rgba(239, 68, 68, 0.1);
+  --red-border: rgba(239, 68, 68, 0.3);
+
+  --amber: #eab308;
+  --amber-bg: rgba(234, 179, 8, 0.1);
+  --amber-border: rgba(234, 179, 8, 0.3);
+
+  --blue: #60a5fa;
+  --blue-bg: rgba(96, 165, 250, 0.1);
+  --blue-border: rgba(96, 165, 250, 0.25);
+
+  --violet: #a78bfa;
+  --violet-bg: rgba(167, 139, 250, 0.1);
+
+  --teal: #2dd4bf;
+  --teal-bg: rgba(45, 212, 191, 0.1);
+
+  --tooltip-bg: #0a0a0a;
+  --tooltip-tx: #f5f0e6;
+
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  --font-serif: 'Fraunces', Georgia, serif;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+}
+
+[data-theme="light"] {
+  --bg: #f7f3ed;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #faf7f1;
+  --bg-surface-3: #f0ebe0;
+  --bg-elevated: #ffffff;
+  --border: #e5dfd2;
+  --border-strong: #cfc7b5;
+
+  --tx: #1a1a1a;
+  --tx-muted: #57534e;
+  --tx-dim: #78716c;
+  --tx-faint: #a8a29e;
+
+  --accent: #b45309;
+  --accent-bright: #d97706;
+  --accent-bg: rgba(180, 83, 9, 0.08);
+  --accent-border: rgba(180, 83, 9, 0.3);
+
+  --green: #15803d;
+  --green-bg: rgba(21, 128, 61, 0.08);
+  --green-border: rgba(21, 128, 61, 0.25);
+
+  --red: #b91c1c;
+  --red-bg: rgba(185, 28, 28, 0.08);
+  --red-border: rgba(185, 28, 28, 0.3);
+
+  --amber: #a16207;
+  --amber-bg: rgba(161, 98, 7, 0.08);
+  --amber-border: rgba(161, 98, 7, 0.3);
+
+  --blue: #1d4ed8;
+  --blue-bg: rgba(29, 78, 216, 0.06);
+  --blue-border: rgba(29, 78, 216, 0.25);
+
+  --violet: #6d28d9;
+  --violet-bg: rgba(109, 40, 217, 0.06);
+
+  --teal: #0d9488;
+  --teal-bg: rgba(13, 148, 136, 0.08);
+
+  --tooltip-bg: #1a1a1a;
+  --tooltip-tx: #f7f3ed;
+}
+
+body {
+  background: var(--bg);
+  color: var(--tx);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Scrollbar refinado */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--tx-faint); }
+
+/* Typography helpers */
+.serif { font-family: var(--font-serif); }
+.mono { font-family: var(--font-mono); font-feature-settings: 'tnum'; }
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* Animations */
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes pulse-soft { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+.fade-in { animation: fadeIn 0.3s ease-out; }
+.spinning { animation: spin 1s linear infinite; }
+.pulse-soft { animation: pulse-soft 2s ease-in-out infinite; }
+
+/* Inputs */
+button { font-family: inherit; }
+button:not(:disabled) { cursor: pointer; }
+input { font-family: inherit; }
+
+/* Tables */
+table { border-collapse: collapse; width: 100%; }
+
+/* Focus ring */
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Drag over state */
+.drag-over { background: var(--accent-bg) !important; border-color: var(--accent) !important; }
+
+/* Mobile */
+@media (max-width: 768px) {
+  .hide-mobile { display: none !important; }
+  .show-mobile { display: initial !important; }
+}
+@media (min-width: 769px) {
+  .show-mobile { display: none !important; }
+}
+
+/* Print */
+@media print {
+  body { background: white; color: black; }
+  .no-print { display: none !important; }
+}
