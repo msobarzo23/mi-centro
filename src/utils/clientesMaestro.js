@@ -114,7 +114,7 @@ function computeDsoFifo(filas) {
 
   const samples = pagados
     .map(c => ({
-      folio: c.folio,
+      folio: c.numeroDoc || c.numero || c.folio,
       fechaEmision: c.fecha,
       fechaPago: c.fechaUltimoPago,
       dias: daysBetween(c.fecha, c.fechaUltimoPago),
@@ -211,12 +211,25 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
   const meses3mAnterior = meses12m.slice(-6, -3);
   const meses6m = meses12m.slice(-6);
 
-  // Agrupar filas crudas por cliente
+  // Agrupar filas crudas por cliente.
+  // En el shape de fileProcessor.js el campo se llama `cliente` (no `ficha`).
+  // Aceptamos ambos por compatibilidad futura.
   const porCliente = new Map();
   for (const r of rawRows || []) {
-    if (!r || !r.ficha || !(r.fecha instanceof Date) || isNaN(r.fecha)) continue;
-    if (!porCliente.has(r.ficha)) porCliente.set(r.ficha, []);
-    porCliente.get(r.ficha).push(r);
+    const nombre = r?.cliente || r?.ficha;
+    if (!nombre || !(r.fecha instanceof Date) || isNaN(r.fecha)) continue;
+    if (!porCliente.has(nombre)) porCliente.set(nombre, []);
+    porCliente.get(nombre).push(r);
+  }
+
+  // Mapa auxiliar: nombre → entry de cobranzas.porCliente.
+  // Necesario porque en fileProcessor.js el índice del objeto es `normName(nombre)`,
+  // no el nombre literal. Reconstruimos el mapa iterando por valores.
+  const cobPorNombre = {};
+  if (cobranzas && cobranzas.porCliente) {
+    for (const c of Object.values(cobranzas.porCliente)) {
+      if (c && c.nombre) cobPorNombre[c.nombre] = c;
+    }
   }
 
   const clientes = [];
@@ -227,7 +240,6 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
     const facturas = filas
       .filter(r => r.tipo === 'Vta_FVAELECT' && r.cargo > 0)
       .sort((a, b) => a.fecha - b.fecha);
-
     // Facturación mensual 12m
     const mapMensual = new Map();
     for (const m of meses12m) mapMensual.set(m, 0);
@@ -263,10 +275,10 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
     const mesesConFacturacion12m = montos12m.filter(m => m > 0).length;
 
     // Saldos desde cobranzas.porCliente (ya calculados por fileProcessor con FIFO arreglado)
-    const cob = (cobranzas && cobranzas.porCliente) ? (cobranzas.porCliente[ficha] || {}) : {};
+    const cob = cobPorNombre[ficha] || {};
     const saldoTotal = cob.saldoPendiente || 0;
-    const saldoCobrable = cob.montoCobrables || cob.saldoCobrable || 0;
-    const saldoCritico = cob.montoCriticas || cob.saldoCritico || 0;
+    const saldoCobrable = cob.montoCobrables || 0;
+    const saldoCritico = cob.montoCriticas || 0;
     const facturasPendientes = cob.facturasPendientes || [];
     const facturasCriticas = cob.facturasCriticas || [];
     const facturasCobrables = cob.facturasCobrables || facturasPendientes.filter(f => !f.critica);
@@ -277,8 +289,13 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
       ? sum(facturasCobrables.map(f => (f.diasAtraso || 0) * f.monto)) / totalCobrableMonto
       : 0;
 
-    // DSO real vía FIFO
-    const dsoData = computeDsoFifo(filas);
+    // DSO real vía FIFO.
+    // Primero probamos el `dsoReal` que ya calcula fileProcessor.js (matcheo por folio).
+    // Si viene null (caso habitual con archivos Defontana actuales donde
+    // `Número Doc. Pago` viene vacío), caemos a FIFO implícito.
+    const dsoFifo = computeDsoFifo(filas);
+    const dsoPromFinal = cob.dsoReal != null ? cob.dsoReal : dsoFifo.dsoProm;
+    const nPagosFinal = cob.dsoMuestras || dsoFifo.nFacturasPagadas;
 
     // DSO efectivo (fallback si no hay pagos observados)
     const dsoEfectivo = promedioMensual3m > 0
@@ -294,7 +311,7 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
 
     const clienteBase = {
       nombre: ficha,
-      idFicha: (filas.find(r => r.idFicha) || {}).idFicha || null,
+      idFicha: cob.rut || (filas.find(r => r.rut) || {}).rut || null,
 
       // facturación
       facturacionMensual,
@@ -325,11 +342,11 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
       diasVencidoPromedio,
 
       // DSO
-      dsoProm: dsoData.dsoProm,
-      dsoMediana: dsoData.dsoMediana,
-      nPagosObservados: dsoData.nFacturasPagadas,
+      dsoProm: dsoPromFinal,
+      dsoMediana: dsoFifo.dsoMediana,
+      nPagosObservados: nPagosFinal,
       dsoEfectivo,
-      dsoSamples: dsoData.samples,
+      dsoSamples: dsoFifo.samples,
 
       // viajes (puede ser null)
       viajesMes,
