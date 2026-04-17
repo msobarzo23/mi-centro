@@ -45,7 +45,7 @@ const mesCorto = (ym) => {
 
 function Sparkline({ data, color = 'var(--accent)', w = 120, h = 28 }) {
   // data = array de números (12 meses)
-  if (!data || data.length === 0) return <span style={{ color: 'var(--fg-dim, var(--fg))' }}>—</span>;
+  if (!data || data.length === 0) return <span style={{ color: 'var(--tx-muted)' }}>—</span>;
   const max = Math.max(...data, 1);
   const min = 0;
   const range = max - min || 1;
@@ -104,7 +104,7 @@ function Heatmap({ facturacion12m, viajes12m, metrica, meses12m }) {
   let valores;
   if (metrica === 'viajes') {
     if (!viajes12m) {
-      return <div style={{ fontSize: 12, color: 'var(--fg-dim, var(--fg))', padding: '12px 0' }}>Sin datos de viajes operacionales conectados.</div>;
+      return <div style={{ fontSize: 12, color: 'var(--tx-muted)', padding: '12px 0' }}>Sin datos de viajes operacionales conectados.</div>;
     }
     const map = new Map(viajes12m.map(v => [v.mes, v.n || 0]));
     valores = meses12m.map(m => map.get(m) || 0);
@@ -135,7 +135,7 @@ function Heatmap({ facturacion12m, viajes12m, metrica, meses12m }) {
                 justifyContent: 'center',
                 padding: 4,
                 fontSize: 9,
-                color: intensity > 0.5 ? 'white' : 'var(--fg-dim, var(--fg))',
+                color: intensity > 0.5 ? 'white' : 'var(--tx-muted)',
                 fontFamily: 'JetBrains Mono, monospace',
                 fontVariantNumeric: 'tabular-nums',
                 fontWeight: 600,
@@ -147,7 +147,7 @@ function Heatmap({ facturacion12m, viajes12m, metrica, meses12m }) {
           );
         })}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 4, fontSize: 10, color: 'var(--fg-dim, var(--fg))', textAlign: 'center' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 4, fontSize: 10, color: 'var(--tx-muted)', textAlign: 'center' }}>
         {meses12m.map(m => <div key={m}>{mesCorto(m)}</div>)}
       </div>
     </div>
@@ -189,7 +189,7 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
     if (dias > 90) return '#dc2626';
     if (dias > 30) return '#ea580c';
     if (dias > 0) return '#d97706';
-    return 'var(--fg-dim, var(--fg))';
+    return 'var(--tx-muted)';
   };
 
   return (
@@ -207,7 +207,7 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
         style={{
           position: 'fixed', top: 0, right: 0, bottom: 0,
           width: 'min(640px, 100vw)',
-          background: 'var(--bg-elev, var(--bg))',
+          background: 'var(--bg-surface)',
           borderLeft: '1px solid var(--border)',
           boxShadow: '-20px 0 60px rgba(0,0,0,.35)',
           zIndex: 91,
@@ -218,22 +218,22 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
         {/* Header sticky */}
         <div style={{
           position: 'sticky', top: 0, zIndex: 2,
-          background: 'var(--bg-elev, var(--bg))',
+          background: 'var(--bg-surface)',
           borderBottom: '1px solid var(--border)',
           padding: '18px 24px 16px',
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontFamily: 'Fraunces, serif', fontSize: 22, fontWeight: 600, lineHeight: 1.15, marginBottom: 4, color: 'var(--fg)' }}>
+              <div style={{ fontFamily: 'Fraunces, serif', fontSize: 22, fontWeight: 600, lineHeight: 1.15, marginBottom: 4, color: 'var(--tx)' }}>
                 {cliente.nombre}
               </div>
-              <div style={{ fontSize: 12, color: 'var(--fg-dim, var(--fg))', fontFamily: 'JetBrains Mono, monospace' }}>
+              <div style={{ fontSize: 12, color: 'var(--tx-muted)', fontFamily: 'JetBrains Mono, monospace' }}>
                 {cliente.idFicha || 'RUT no disponible'}
               </div>
               <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <EstadoBadge estado={cliente.estado} />
                 {cliente.esGrande && (
-                  <span style={{ fontSize: 11, color: 'var(--fg-dim, var(--fg))', padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 999 }}>
+                  <span style={{ fontSize: 11, color: 'var(--tx-muted)', padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 999 }}>
                     {fmtPct(cliente.participacion * 100)} de cartera
                   </span>
                 )}
@@ -243,7 +243,7 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
               onClick={onClose}
               style={{
                 background: 'transparent', border: '1px solid var(--border)', borderRadius: 8,
-                padding: 8, cursor: 'pointer', color: 'var(--fg)',
+                padding: 8, cursor: 'pointer', color: 'var(--tx)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}
               aria-label="Cerrar"
@@ -291,7 +291,7 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
                   display: 'flex', alignItems: 'flex-start', gap: 10,
                   padding: '10px 12px', background: 'rgba(217, 119, 6, 0.08)',
                   borderLeft: '3px solid #d97706', borderRadius: 6,
-                  fontSize: 13, color: 'var(--fg)',
+                  fontSize: 13, color: 'var(--tx)',
                 }}>
                   <AlertTriangle size={14} style={{ marginTop: 2, color: '#d97706', flexShrink: 0 }} />
                   <span>{a.msg}</span>
@@ -303,7 +303,7 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
           {/* Heatmap con toggle */}
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--fg)' }}>
+              <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--tx)' }}>
                 Histórico 12 meses
               </div>
               <div style={{ display: 'flex', gap: 0, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
@@ -314,7 +314,7 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
                     style={{
                       padding: '5px 12px', fontSize: 11, fontWeight: 600,
                       background: metricaHeatmap === k ? 'var(--accent)' : 'transparent',
-                      color: metricaHeatmap === k ? 'white' : 'var(--fg-dim, var(--fg))',
+                      color: metricaHeatmap === k ? 'white' : 'var(--tx-muted)',
                       border: 'none', cursor: 'pointer',
                       textTransform: 'capitalize',
                     }}
@@ -334,15 +334,15 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
 
           {/* Gráfico barras mensual */}
           <div>
-            <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--fg)', marginBottom: 10 }}>
+            <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--tx)', marginBottom: 10 }}>
               Facturación mensual
             </div>
             <div style={{ height: 180, width: '100%' }}>
               <ResponsiveContainer>
                 <BarChart data={barData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
                   <CartesianGrid stroke="var(--border)" vertical={false} strokeDasharray="2 2" />
-                  <XAxis dataKey="mes" tick={{ fontSize: 10, fill: 'var(--fg-dim, var(--fg))' }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize: 10, fill: 'var(--fg-dim, var(--fg))' }} axisLine={false} tickLine={false}
+                  <XAxis dataKey="mes" tick={{ fontSize: 10, fill: 'var(--tx-muted)' }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 10, fill: 'var(--tx-muted)' }} axisLine={false} tickLine={false}
                     tickFormatter={v => fmtM(v, 0).replace('$', '')} width={40} />
                   <Tooltip content={<ChartTooltip valueFormatter={fmtFull} />} cursor={{ fill: 'rgba(217,119,6,0.08)' }} />
                   <Bar dataKey="monto" fill="var(--accent)" radius={[3, 3, 0, 0]} />
@@ -354,13 +354,13 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
           {/* Top facturas pendientes */}
           {topFacturas.length > 0 && (
             <div>
-              <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--fg)', marginBottom: 10 }}>
+              <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--tx)', marginBottom: 10 }}>
                 Facturas pendientes — top {topFacturas.length}
               </div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
                 <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                   <thead>
-                    <tr style={{ background: 'var(--bg)', color: 'var(--fg-dim, var(--fg))', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    <tr style={{ background: 'var(--bg-surface)', color: 'var(--tx-muted)', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                       <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 500 }}>Folio</th>
                       <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 500 }}>Emisión</th>
                       <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 500 }}>Vence</th>
@@ -372,8 +372,8 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
                     {topFacturas.map((f, i) => (
                       <tr key={`${f.folio}-${i}`} style={{ borderTop: '1px solid var(--border)' }}>
                         <td style={{ padding: '8px 10px', fontFamily: 'JetBrains Mono, monospace' }}>{f.folio}</td>
-                        <td style={{ padding: '8px 10px', color: 'var(--fg-dim, var(--fg))' }}>{fmtDate(f.fecha)}</td>
-                        <td style={{ padding: '8px 10px', color: 'var(--fg-dim, var(--fg))' }}>{fmtDate(f.vencimiento)}</td>
+                        <td style={{ padding: '8px 10px', color: 'var(--tx-muted)' }}>{fmtDate(f.fecha)}</td>
+                        <td style={{ padding: '8px 10px', color: 'var(--tx-muted)' }}>{fmtDate(f.vencimiento)}</td>
                         <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums' }}>
                           {fmtFull(f.monto)}
                         </td>
@@ -386,7 +386,7 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
                 </table>
               </div>
               {(cliente.facturasPendientes || []).length > 10 && (
-                <div style={{ marginTop: 8, fontSize: 11, color: 'var(--fg-dim, var(--fg))', textAlign: 'right' }}>
+                <div style={{ marginTop: 8, fontSize: 11, color: 'var(--tx-muted)', textAlign: 'right' }}>
                   Mostrando 10 de {cliente.facturasPendientes.length} facturas pendientes
                 </div>
               )}
@@ -395,7 +395,7 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
 
           {/* Ficha técnica */}
           <div style={{ paddingTop: 16, borderTop: '1px solid var(--border)' }}>
-            <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--fg)', marginBottom: 10 }}>
+            <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--tx)', marginBottom: 10 }}>
               Ficha técnica
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 20px', fontSize: 12 }}>
@@ -427,18 +427,18 @@ function ClienteDrawer({ cliente, onClose, meses12m }) {
 function MiniKpi({ icon, label, value, sub, subColor }) {
   return (
     <div style={{
-      padding: '12px 14px', background: 'var(--bg)',
+      padding: '12px 14px', background: 'var(--bg-surface)',
       border: '1px solid var(--border)', borderRadius: 10,
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--fg-dim, var(--fg))', fontSize: 11, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--tx-muted)', fontSize: 11, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         {icon}
         <span>{label}</span>
       </div>
-      <div style={{ fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums', fontSize: 18, fontWeight: 600, color: 'var(--fg)' }}>
+      <div style={{ fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums', fontSize: 18, fontWeight: 600, color: 'var(--tx)' }}>
         {value}
       </div>
       {sub && (
-        <div style={{ fontSize: 11, color: subColor || 'var(--fg-dim, var(--fg))', marginTop: 2 }}>{sub}</div>
+        <div style={{ fontSize: 11, color: subColor || 'var(--tx-muted)', marginTop: 2 }}>{sub}</div>
       )}
     </div>
   );
@@ -447,10 +447,10 @@ function MiniKpi({ icon, label, value, sub, subColor }) {
 function FichaRow({ label, value, color }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-      <span style={{ color: 'var(--fg-dim, var(--fg))' }}>{label}</span>
+      <span style={{ color: 'var(--tx-muted)' }}>{label}</span>
       <span style={{
         fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums',
-        color: color || 'var(--fg)', fontWeight: 500,
+        color: color || 'var(--tx)', fontWeight: 500,
       }}>{value}</span>
     </div>
   );
@@ -551,7 +551,7 @@ export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
                     borderRadius: 999,
                     border: `1px solid ${activo ? meta.color : 'var(--border)'}`,
                     background: activo ? meta.bg : 'transparent',
-                    color: activo ? meta.color : 'var(--fg-dim, var(--fg))',
+                    color: activo ? meta.color : 'var(--tx-muted)',
                     cursor: 'pointer',
                     fontSize: 12,
                     fontWeight: 600,
@@ -562,12 +562,12 @@ export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
                     transition: 'all 150ms',
                   }}
                 >
-                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: activo ? meta.color : 'var(--fg-dim, var(--fg))' }} />
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: activo ? meta.color : 'var(--tx-muted)' }} />
                   {meta.label}
                   <span style={{
                     padding: '0 6px', borderRadius: 10, fontSize: 10,
                     background: activo ? meta.color : 'var(--border)',
-                    color: activo ? 'white' : 'var(--fg-dim, var(--fg))',
+                    color: activo ? 'white' : 'var(--tx-muted)',
                   }}>{count}</span>
                 </button>
               );
@@ -578,9 +578,9 @@ export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
             display: 'flex', alignItems: 'center', gap: 8,
             padding: '8px 12px',
             border: '1px solid var(--border)', borderRadius: 8,
-            background: 'var(--bg)',
+            background: 'var(--bg-surface)',
           }}>
-            <Search size={14} style={{ color: 'var(--fg-dim, var(--fg))' }} />
+            <Search size={14} style={{ color: 'var(--tx-muted)' }} />
             <input
               type="text"
               placeholder="Buscar cliente o RUT…"
@@ -588,11 +588,11 @@ export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
               onChange={e => setSearch(e.target.value)}
               style={{
                 flex: 1, border: 'none', outline: 'none',
-                background: 'transparent', color: 'var(--fg)', fontSize: 13,
+                background: 'transparent', color: 'var(--tx)', fontSize: 13,
                 fontFamily: 'Inter, sans-serif',
               }}
             />
-            <span style={{ fontSize: 11, color: 'var(--fg-dim, var(--fg))', fontFamily: 'JetBrains Mono, monospace' }}>
+            <span style={{ fontSize: 11, color: 'var(--tx-muted)', fontFamily: 'JetBrains Mono, monospace' }}>
               {clientesFiltrados.length} / {maestro.clientes.length}
             </span>
           </div>
@@ -612,7 +612,7 @@ export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
               fontSize: 10,
               textTransform: 'uppercase',
               letterSpacing: 0.6,
-              color: 'var(--fg-dim, var(--fg))',
+              color: 'var(--tx-muted)',
               borderBottom: '1px solid var(--border)',
               fontWeight: 600,
             }}>
@@ -669,10 +669,10 @@ export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
                 >
                   {/* Cliente */}
                   <div style={{ overflow: 'hidden' }}>
-                    <div style={{ fontWeight: 600, color: 'var(--fg)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <div style={{ fontWeight: 600, color: 'var(--tx)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {c.nombre}
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--fg-dim, var(--fg))', fontFamily: 'JetBrains Mono, monospace' }}>
+                    <div style={{ fontSize: 11, color: 'var(--tx-muted)', fontFamily: 'JetBrains Mono, monospace' }}>
                       {c.idFicha || '—'}
                     </div>
                   </div>
@@ -695,7 +695,7 @@ export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
                   </div>
 
                   {/* Participación */}
-                  <div style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums', color: c.esGrande ? 'var(--accent)' : 'var(--fg-dim, var(--fg))', fontWeight: c.esGrande ? 600 : 400 }}>
+                  <div style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums', color: c.esGrande ? 'var(--accent)' : 'var(--tx-muted)', fontWeight: c.esGrande ? 600 : 400 }}>
                     {fmtPct(c.participacion * 100, 1)}
                   </div>
 
@@ -705,7 +705,7 @@ export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
                   </div>
 
                   {/* Viajes mes */}
-                  <div style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums', color: 'var(--fg-dim, var(--fg))' }}>
+                  <div style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums', color: 'var(--tx-muted)' }}>
                     {c.viajesMes != null ? fmtInt(c.viajesMes) : '—'}
                   </div>
 
@@ -726,7 +726,7 @@ export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
                         {Math.round(c.dsoProm)}d
                       </span>
                     ) : c.dsoEfectivo != null ? (
-                      <span style={{ color: 'var(--fg-dim, var(--fg))', fontSize: 11 }}>~{Math.round(c.dsoEfectivo)}d</span>
+                      <span style={{ color: 'var(--tx-muted)', fontSize: 11 }}>~{Math.round(c.dsoEfectivo)}d</span>
                     ) : '—'}
                   </div>
                 </div>
@@ -734,7 +734,7 @@ export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
             })}
 
             {clientesFiltrados.length === 0 && (
-              <div style={{ padding: 40, textAlign: 'center', color: 'var(--fg-dim, var(--fg))', fontSize: 13 }}>
+              <div style={{ padding: 40, textAlign: 'center', color: 'var(--tx-muted)', fontSize: 13 }}>
                 Ningún cliente coincide con los filtros.
               </div>
             )}
