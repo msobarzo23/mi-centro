@@ -2,15 +2,17 @@
 //
 // Motor de cálculos puros para el tab "Clientes 360".
 //
-// v1.2: Acepta un histórico largo opcional (`historicoRows`) que se usa
-// para calcular `facturacionMensual 12m`, `primeraFactura`, y todo lo
-// relacionado con tendencia histórica. Si no se provee, se usa `rawRows`
-// (archivo de saldos actuales) como antes — lo que genera el bug de
-// "MAXAM aparece como Nuevo" cuando el archivo es corto.
+// v1.3.3: DSO por folio (columna N "Número Doc."). Reemplaza el FIFO
+// anterior que agrupaba por cliente en vez de por factura individual.
 
 import {
   fmtM, fmtFull, daysBetween, todayMidnight,
 } from './helpers_v2.js';
+
+export const CLIENTES_MAESTRO_VERSION = "1.3.3";
+if (typeof window !== "undefined") {
+  console.log("[mi-centro] clientesMaestro v" + CLIENTES_MAESTRO_VERSION + " cargado");
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Umbrales de clasificación
@@ -43,63 +45,76 @@ const mean = arr => (arr.length ? sum(arr) / arr.length : 0);
 const safeDiv = (a, b) => (b > 0 ? a / b : 0);
 
 // ──────────────────────────────────────────────────────────────────────
-// DSO real vía FIFO implícito
+// DSO real vía matching exacto por folio (columna N "Número Doc.")
+// v1.3.3: fix crítico. El FIFO anterior daba números artificialmente bajos
+// porque agrupaba por cliente en vez de por folio individual.
 // ──────────────────────────────────────────────────────────────────────
 
+function normFolio(v) {
+  if (v == null || v === '') return '';
+  const s = String(v).trim();
+  if (/^\d+\.0+$/.test(s)) return s.split('.')[0];
+  return s;
+}
+
 function computeDsoFifo(filas) {
-  const cargos = filas
-    .filter(r => r.tipo !== 'INGRESO' && r.cargo > 0)
-    .sort((a, b) => a.fecha - b.fecha)
-    .map(r => ({ ...r, pagado: 0, fechaUltimoPago: null }));
-
-  const abonosNetos = [];
+  // Agrupar filas por folio (numeroDoc)
+  const porFolio = new Map();
   for (const r of filas) {
-    if (r.tipo === 'INGRESO') {
-      if (r.abono > 0) abonosNetos.push({ fecha: r.fecha, monto: r.abono });
-      if (r.cargo > 0) abonosNetos.push({ fecha: r.fecha, monto: -r.cargo });
-    }
+    if (!r || !(r.fecha instanceof Date) || isNaN(r.fecha)) continue;
+    const folio = normFolio(r.numeroDoc);
+    if (!folio) continue;
+    if (!porFolio.has(folio)) porFolio.set(folio, []);
+    porFolio.get(folio).push(r);
   }
-  abonosNetos.sort((a, b) => a.fecha - b.fecha);
-
-  let ptr = 0;
-  let saldoAbonoAcum = 0;
-
-  for (const ab of abonosNetos) {
-    saldoAbonoAcum += ab.monto;
-    if (saldoAbonoAcum <= 0) continue;
-    while (saldoAbonoAcum > 0 && ptr < cargos.length) {
-      const c = cargos[ptr];
-      const falta = c.cargo - c.pagado;
-      if (saldoAbonoAcum >= falta) {
-        c.pagado = c.cargo;
-        c.fechaUltimoPago = ab.fecha;
-        saldoAbonoAcum -= falta;
-        ptr++;
-      } else {
-        c.pagado += saldoAbonoAcum;
-        c.fechaUltimoPago = ab.fecha;
-        saldoAbonoAcum = 0;
-      }
-    }
-  }
-
-  const pagados = cargos.filter(c => c.pagado >= c.cargo - 1 && c.fechaUltimoPago && c.tipo !== 'APERTURA');
-  if (pagados.length === 0) return { dsoProm: null, dsoMediana: null, nFacturasPagadas: 0, samples: [] };
 
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - 18);
 
-  const samples = pagados
-    .map(c => ({
-      folio: c.numeroDoc || c.numero || c.folio,
-      fechaEmision: c.fecha,
-      fechaPago: c.fechaUltimoPago,
-      dias: daysBetween(c.fecha, c.fechaUltimoPago),
-      monto: c.cargo,
-    }))
-    .filter(s => s.dias >= 0 && s.fechaEmision >= cutoff);
+  const samples = [];
 
-  if (samples.length === 0) return { dsoProm: null, dsoMediana: null, nFacturasPagadas: 0, samples: [] };
+  porFolio.forEach((rows, folio) => {
+    // Facturas reales (Vta_*) vs reversiones (INGRESO con cargo)
+    const facturas = rows
+      .filter(r => r.cargo > 0 && r.tipo !== 'INGRESO')
+      .sort((a, b) => a.fecha - b.fecha);
+    if (facturas.length === 0) return;
+
+    const primerCargo = facturas[0];
+    if (primerCargo.tipo === 'APERTURA') return;
+    if (primerCargo.fecha < cutoff) return; // muestra fuera de ventana
+
+    const abonos = rows
+      .filter(r => r.abono > 0)
+      .sort((a, b) => a.fecha - b.fecha);
+    if (abonos.length === 0) return;
+
+    const reversiones = rows
+      .filter(r => r.cargo > 0 && r.tipo === 'INGRESO')
+      .reduce((s, r) => s + r.cargo, 0);
+
+    const totalFacturas = facturas.reduce((s, r) => s + r.cargo, 0);
+    const totalAbonos = abonos.reduce((s, r) => s + r.abono, 0) - reversiones;
+
+    // Folio saldado completo → DSO basado en último abono
+    if (totalFacturas - totalAbonos > 0.01) return;
+
+    const ultimoAbono = abonos[abonos.length - 1];
+    const dias = daysBetween(primerCargo.fecha, ultimoAbono.fecha);
+    if (dias === null || dias < 0 || dias >= 730) return;
+
+    samples.push({
+      folio,
+      fechaEmision: primerCargo.fecha,
+      fechaPago: ultimoAbono.fecha,
+      dias,
+      monto: totalFacturas,
+    });
+  });
+
+  if (samples.length === 0) {
+    return { dsoProm: null, dsoMediana: null, nFacturasPagadas: 0, samples: [] };
+  }
 
   const totalMonto = sum(samples.map(s => s.monto));
   const dsoProm = totalMonto > 0
@@ -111,7 +126,7 @@ function computeDsoFifo(filas) {
     ? sorted[(sorted.length - 1) / 2]
     : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
 
-  return { dsoProm, dsoMediana, nFacturasPagadas: pagados.length, samples };
+  return { dsoProm, dsoMediana, nFacturasPagadas: samples.length, samples };
 }
 
 // ──────────────────────────────────────────────────────────────────────
