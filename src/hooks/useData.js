@@ -9,9 +9,12 @@ import { processFiles, computeCobranzas } from "../utils/fileProcessor.js";
 import { todayMidnight } from "../utils/helpers_v2.js";
 
 // Keys de localStorage
-const STORAGE_KEY_SALDOS = "mi_centro_saldos_v2";
-const STORAGE_KEY_HISTORICO = "mi_centro_historico_v2";
-// v1 para retrocompatibilidad (migración)
+// v3: forzamos reprocesamiento limpio tras cambios algorítmicos (DSO por folio)
+const STORAGE_KEY_SALDOS = "mi_centro_saldos_v3";
+const STORAGE_KEY_HISTORICO = "mi_centro_historico_v3";
+// Versiones anteriores (para migración)
+const STORAGE_KEY_SALDOS_V2 = "mi_centro_saldos_v2";
+const STORAGE_KEY_HISTORICO_V2 = "mi_centro_historico_v2";
 const STORAGE_KEY_COBRANZAS_V1 = "mi_centro_cobranzas_v1";
 
 function rehydrateDates(obj) {
@@ -99,19 +102,36 @@ export function useData() {
     }
   }, []);
 
-  // Carga inicial de archivos persistidos + migración desde v1
+  // Carga inicial de archivos persistidos + migración desde v2/v1
   useEffect(() => {
-    // Intentar cargar v2
-    const saldos = loadFromStorage(STORAGE_KEY_SALDOS);
-    const historico = loadFromStorage(STORAGE_KEY_HISTORICO);
-    if (saldos) setSaldosRaw(saldos);
-    if (historico) setHistoricoRaw(historico);
+    // Intentar cargar v3 directamente
+    let saldos = loadFromStorage(STORAGE_KEY_SALDOS);
+    let historico = loadFromStorage(STORAGE_KEY_HISTORICO);
 
-    // Migrar desde v1 si existe y no hay v2
+    // Migrar desde v2 si existe y no hay v3
+    if (!saldos) {
+      const v2 = loadFromStorage(STORAGE_KEY_SALDOS_V2);
+      if (v2) {
+        saldos = v2;
+        saveToStorage(STORAGE_KEY_SALDOS, v2);
+        try { localStorage.removeItem(STORAGE_KEY_SALDOS_V2); } catch (_) {}
+        console.log("[mi-centro] Saldos migrados v2 → v3");
+      }
+    }
+    if (!historico) {
+      const v2 = loadFromStorage(STORAGE_KEY_HISTORICO_V2);
+      if (v2) {
+        historico = v2;
+        saveToStorage(STORAGE_KEY_HISTORICO, v2);
+        try { localStorage.removeItem(STORAGE_KEY_HISTORICO_V2); } catch (_) {}
+        console.log("[mi-centro] Histórico migrado v2 → v3");
+      }
+    }
+
+    // Migración más antigua desde v1 si no hay v2 ni v3
     if (!saldos) {
       const v1 = loadFromStorage(STORAGE_KEY_COBRANZAS_V1);
       if (v1) {
-        // Wrapea el v1 (formato antiguo) en el nuevo formato
         const migrated = {
           movimientos: v1.movimientos || [],
           fechaInforme: v1.fechaInforme,
@@ -125,11 +145,15 @@ export function useData() {
           }],
           cuentasDetectadas: ["1110401001"],
         };
-        setSaldosRaw(migrated);
+        saldos = migrated;
         saveToStorage(STORAGE_KEY_SALDOS, migrated);
         try { localStorage.removeItem(STORAGE_KEY_COBRANZAS_V1); } catch (_) {}
+        console.log("[mi-centro] Saldos migrados v1 → v3");
       }
     }
+
+    if (saldos) setSaldosRaw(saldos);
+    if (historico) setHistoricoRaw(historico);
   }, []);
 
   useEffect(() => {
