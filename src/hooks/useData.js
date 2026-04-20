@@ -6,7 +6,7 @@ import {
   parseVentas, parseViajes, parseCredito, parseLeasingResumenRaw,
 } from "../utils/parsers.js";
 import { processFiles, computeCobranzas } from "../utils/fileProcessor.js";
-import { todayMidnight } from "../utils/format.js";
+import { todayMidnight } from "../utils/helpers_v2.js";
 
 // Keys de localStorage
 const STORAGE_KEY_SALDOS = "mi_centro_saldos_v2";

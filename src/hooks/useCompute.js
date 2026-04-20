@@ -1,6 +1,5 @@
 import { useMemo } from "react";
-import { normName, pctChange, todayMidnight, daysBetween, startOfWeek, endOfWeek } from "../utils/format.js";
-import { getDapType } from "../utils/parsers.js";
+import { normName, pctChange, todayMidnight, daysBetween, startOfWeek, endOfWeek } from "../utils/helpers_v2.js";
 
 // ══════════════════════════════════════════════════════════════════════
 // MOTOR DE CRUCE DE DATOS
