@@ -187,88 +187,156 @@ export function computeCobranzas(procesado, todayRef = null) {
   });
 
   // Para cada cliente, derivar estado de facturas
+  // NUEVO algoritmo v1.3: matching exacto por folio (columna N "Número Doc.")
+  // Una factura Vta_* y todos los INGRESO que la pagan comparten el mismo
+  // numeroDoc. Esto permite:
+  //   - Detectar pagos parciales (múltiples INGRESO al mismo folio)
+  //   - Calcular DSO real sin FIFO aproximado
+  //   - Identificar facturas pendientes con saldo exacto
+  // Las filas sin numeroDoc caen a FIFO como fallback.
   Object.values(porCliente).forEach(c => {
     c.saldoPendiente = c.totalCargo - c.totalAbono;
     c.esInternacional = c.cuentas.has("1110401002");
     c.cuentas = Array.from(c.cuentas);
 
-    // CARGOS = cualquier fila con cargo > 0 y tipo != INGRESO (incluye Vta_* y APERTURA)
-    const cargos = c.movimientos
-      .filter(m => m.cargo > 0 && m.tipo !== "INGRESO")
-      .sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
+    // Helper para normalizar folios (pueden venir como número o string con .0)
+    const normFolio = (v) => {
+      if (v == null || v === "") return "";
+      const s = String(v).trim();
+      if (/^\d+\.0+$/.test(s)) return s.split(".")[0];
+      return s;
+    };
 
-    // ABONOS NETOS = todos los abonos - los cargos de filas tipo INGRESO (reversiones)
-    const abonosTotal = c.movimientos.filter(m => m.abono > 0).reduce((s, m) => s + m.abono, 0);
-    const cargosIngreso = c.movimientos.filter(m => m.tipo === "INGRESO" && m.cargo > 0).reduce((s, m) => s + m.cargo, 0);
-    const abonosNetos = abonosTotal - cargosIngreso;
-
-    // ─── DSO real vía matcheo por numeroDocPago ───
-    const pagos = c.movimientos.filter(m => m.abono > 0);
-    const dsoSamples = [];
-    pagos.forEach(pago => {
-      let facturaMatch = null;
-      if (pago.numeroDocPago) {
-        facturaMatch = cargos.find(f =>
-          String(f.numeroDoc).trim() === String(pago.numeroDocPago).trim() ||
-          String(f.numero).trim() === String(pago.numeroDocPago).trim()
-        );
+    // Agrupar por folio
+    const porFolio = new Map();
+    const sinFolio = [];
+    c.movimientos.forEach(m => {
+      const folio = normFolio(m.numeroDoc);
+      if (!folio) {
+        sinFolio.push(m);
+        return;
       }
-      if (facturaMatch && facturaMatch.fecha && pago.fecha) {
-        const dias = daysBetween(facturaMatch.fecha, pago.fecha);
-        if (dias !== null && dias >= 0 && dias < 365) {
-          dsoSamples.push({ dias, monto: pago.abono });
-        }
-      }
+      if (!porFolio.has(folio)) porFolio.set(folio, []);
+      porFolio.get(folio).push(m);
     });
+
+    c.facturasPendientes = [];
+    c.facturasCriticas = [];
+    c.facturasCobrables = [];
+    const dsoSamples = [];
+    let facturasCount = 0;
+    let pagosCount = 0;
+
+    porFolio.forEach((rows, folio) => {
+      // Separar cargos (facturas + reversiones + APERTURA) y abonos (pagos + notas crédito)
+      const cargos = rows.filter(r => r.cargo > 0).sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
+      const abonos = rows.filter(r => r.abono > 0).sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
+
+      if (cargos.length === 0) return; // folio solo con abonos sueltos → ignorar aquí
+
+      const totalCargos = cargos.reduce((s, r) => s + r.cargo, 0);
+      const totalAbonos = abonos.reduce((s, r) => s + r.abono, 0);
+      const saldoFolio = totalCargos - totalAbonos;
+
+      const primerCargo = cargos[0];
+      if (primerCargo.tipo !== "APERTURA") facturasCount++;
+      pagosCount += abonos.length;
+
+      if (saldoFolio <= 0.01) {
+        // Folio completamente pagado → DSO basado en fecha del último abono que saldó
+        if (abonos.length > 0 && primerCargo.fecha && primerCargo.tipo !== "APERTURA") {
+          const ultimoAbono = abonos[abonos.length - 1];
+          const dias = daysBetween(primerCargo.fecha, ultimoAbono.fecha);
+          if (dias !== null && dias >= 0 && dias < 730) {
+            dsoSamples.push({
+              dias,
+              monto: totalCargos,
+              folio,
+              fechaEmision: primerCargo.fecha,
+              fechaPago: ultimoAbono.fecha,
+              pagosParciales: abonos.length,
+            });
+          }
+        }
+        return;
+      }
+
+      // Folio pendiente — factura con saldo por cobrar
+      const venc = primerCargo.vencimiento || estimarVencimiento(primerCargo.fecha, c.nombre);
+      const diasAtraso = venc ? daysBetween(venc, today) : null;
+      const critica = diasAtraso != null && diasAtraso > UMBRAL_FACTURA_CRITICA_DIAS;
+
+      const fact = {
+        folio,
+        fecha: primerCargo.fecha,
+        vencimiento: venc,
+        monto: saldoFolio,
+        montoOriginal: totalCargos,
+        montoPagado: totalAbonos,
+        documento: primerCargo.documento,
+        diasAtraso,
+        tipo: primerCargo.tipo,
+        cuenta: primerCargo.cuenta,
+        esApertura: primerCargo.tipo === "APERTURA",
+        critica,
+        pagosParciales: abonos.length,
+        parcial: abonos.length > 0,
+      };
+      c.facturasPendientes.push(fact);
+      if (critica) c.facturasCriticas.push(fact);
+      else c.facturasCobrables.push(fact);
+    });
+
+    // Fallback FIFO para movimientos sin folio (si los hubiera — caso raro)
+    if (sinFolio.length > 0) {
+      const cargosSF = sinFolio.filter(m => m.cargo > 0).sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
+      const abonosSF = sinFolio.filter(m => m.abono > 0);
+      let rem = abonosSF.reduce((s, m) => s + m.abono, 0) - sinFolio.filter(m => m.cargo > 0 && m.tipo === "INGRESO").reduce((s, m) => s + m.cargo, 0);
+      for (const f of cargosSF) {
+        if (f.tipo === "INGRESO") continue; // las reversiones ya se descontaron arriba
+        if (rem >= f.cargo) { rem -= f.cargo; continue; }
+        const saldoF = f.cargo - rem;
+        rem = 0;
+        const venc = f.vencimiento || estimarVencimiento(f.fecha, c.nombre);
+        const diasAtraso = venc ? daysBetween(venc, today) : null;
+        const critica = diasAtraso != null && diasAtraso > UMBRAL_FACTURA_CRITICA_DIAS;
+        const fact = {
+          folio: f.numero || "—",
+          fecha: f.fecha, vencimiento: venc,
+          monto: saldoF, montoOriginal: f.cargo, montoPagado: f.cargo - saldoF,
+          documento: f.documento, diasAtraso, tipo: f.tipo, cuenta: f.cuenta,
+          esApertura: f.tipo === "APERTURA", critica, pagosParciales: 0, parcial: false,
+          sinFolio: true,
+        };
+        c.facturasPendientes.push(fact);
+        if (critica) c.facturasCriticas.push(fact);
+        else c.facturasCobrables.push(fact);
+        facturasCount++;
+      }
+    }
+
+    c.facturasCount = facturasCount;
+    c.pagosCount = pagosCount;
+
+    // DSO ponderado por monto original de cada factura
     if (dsoSamples.length > 0) {
       const totMonto = dsoSamples.reduce((s, x) => s + x.monto, 0);
       c.dsoReal = totMonto > 0
         ? dsoSamples.reduce((s, x) => s + x.dias * x.monto, 0) / totMonto
         : null;
       c.dsoMuestras = dsoSamples.length;
+      c.dsoSamples = dsoSamples; // expuesto para debugging/drawer
     } else {
       c.dsoReal = null;
       c.dsoMuestras = 0;
+      c.dsoSamples = [];
     }
 
-    c.facturasCount = cargos.length;
-    c.pagosCount = pagos.length;
-
-    // ─── FIFO: aplicar abonosNetos a cargos ordenados ascendente por fecha ───
-    c.facturasPendientes = [];
-    c.facturasCriticas = [];
-    c.facturasCobrables = [];
-
-    if (c.saldoPendiente <= 0.01) return;
-
-    let rem = Math.max(0, abonosNetos);
-    for (const f of cargos) {
-      if (rem >= f.cargo) {
-        rem -= f.cargo;
-        continue;
-      }
-      const saldoF = f.cargo - rem;
-      rem = 0;
-      const venc = f.vencimiento || estimarVencimiento(f.fecha, c.nombre);
-      const diasAtraso = venc ? daysBetween(venc, today) : null;
-      const critica = diasAtraso != null && diasAtraso > UMBRAL_FACTURA_CRITICA_DIAS;
-
-      const fact = {
-        folio: f.numero,
-        fecha: f.fecha,
-        vencimiento: venc,
-        monto: saldoF,
-        documento: f.documento,
-        diasAtraso,
-        tipo: f.tipo,
-        cuenta: f.cuenta,
-        esApertura: f.tipo === "APERTURA",
-        critica,
-      };
-      c.facturasPendientes.push(fact);
-      if (critica) c.facturasCriticas.push(fact);
-      else c.facturasCobrables.push(fact);
-    }
+    // Recalcular saldo pendiente usando solo folios con saldo > 0
+    // (si todo está saldado por folio pero el total general da negativo,
+    //  significa que hay sobrepagos — se muestran como 0, no negativo)
+    const saldoPorFolios = c.facturasPendientes.reduce((s, f) => s + f.monto, 0);
+    c.saldoPendienteFolios = saldoPorFolios;
 
     c.montoCriticas = c.facturasCriticas.reduce((s, f) => s + f.monto, 0);
     c.montoCobrables = c.facturasCobrables.reduce((s, f) => s + f.monto, 0);
