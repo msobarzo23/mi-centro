@@ -5,14 +5,59 @@ import {
   parseCalendario, parseBancos, parseDAP, parseFondos,
   parseVentas, parseViajes, parseCredito, parseLeasingResumenRaw,
 } from "../utils/parsers.js";
-import { processCobranzasFile, computeCobranzas } from "../utils/fileProcessor.js";
+import { processFiles, computeCobranzas } from "../utils/fileProcessor.js";
 import { todayMidnight } from "../utils/format.js";
 
-const STORAGE_KEY_COBRANZAS = "mi_centro_cobranzas_v1";
+// Keys de localStorage
+const STORAGE_KEY_SALDOS = "mi_centro_saldos_v2";
+const STORAGE_KEY_HISTORICO = "mi_centro_historico_v2";
+// v1 para retrocompatibilidad (migración)
+const STORAGE_KEY_COBRANZAS_V1 = "mi_centro_cobranzas_v1";
+
+function rehydrateDates(obj) {
+  if (!obj) return null;
+  if (obj.movimientos) {
+    obj.movimientos.forEach(m => {
+      if (m.fecha) m.fecha = new Date(m.fecha);
+      if (m.vencimiento) m.vencimiento = new Date(m.vencimiento);
+    });
+  }
+  if (obj.fechaInforme) obj.fechaInforme = new Date(obj.fechaInforme);
+  if (obj.fechaMin) obj.fechaMin = new Date(obj.fechaMin);
+  if (obj.fechaMax) obj.fechaMax = new Date(obj.fechaMax);
+  if (obj.archivos) {
+    obj.archivos.forEach(a => {
+      if (a.fechaInforme) a.fechaInforme = new Date(a.fechaInforme);
+      if (a.fechaMin) a.fechaMin = new Date(a.fechaMin);
+      if (a.fechaMax) a.fechaMax = new Date(a.fechaMax);
+    });
+  }
+  return obj;
+}
+
+function loadFromStorage(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    return rehydrateDates(obj);
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveToStorage(key, obj) {
+  try {
+    localStorage.setItem(key, JSON.stringify(obj));
+  } catch (e) {
+    console.warn("Storage write failed", e);
+  }
+}
 
 export function useData() {
   const [sheets, setSheets] = useState(null);
-  const [cobranzasRaw, setCobranzasRaw] = useState(null);
+  const [saldosRaw, setSaldosRaw] = useState(null);
+  const [historicoRaw, setHistoricoRaw] = useState(null);
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState(null);
   const [error, setError] = useState(null);
@@ -54,26 +99,39 @@ export function useData() {
     }
   }, []);
 
-  // Cargar cobranzas desde localStorage al montar
+  // Carga inicial de archivos persistidos + migración desde v1
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_COBRANZAS);
-      if (raw) {
-        const obj = JSON.parse(raw);
-        // Re-hidratar fechas (localStorage serializa Date como string)
-        if (obj && obj.movimientos) {
-          obj.movimientos.forEach(m => {
-            if (m.fecha) m.fecha = new Date(m.fecha);
-            if (m.vencimiento) m.vencimiento = new Date(m.vencimiento);
-          });
-          if (obj.fechaInforme) obj.fechaInforme = new Date(obj.fechaInforme);
-          setCobranzasRaw(obj);
-        }
+    // Intentar cargar v2
+    const saldos = loadFromStorage(STORAGE_KEY_SALDOS);
+    const historico = loadFromStorage(STORAGE_KEY_HISTORICO);
+    if (saldos) setSaldosRaw(saldos);
+    if (historico) setHistoricoRaw(historico);
+
+    // Migrar desde v1 si existe y no hay v2
+    if (!saldos) {
+      const v1 = loadFromStorage(STORAGE_KEY_COBRANZAS_V1);
+      if (v1) {
+        // Wrapea el v1 (formato antiguo) en el nuevo formato
+        const migrated = {
+          movimientos: v1.movimientos || [],
+          fechaInforme: v1.fechaInforme,
+          totalMovimientos: v1.totalMovimientos || (v1.movimientos || []).length,
+          archivos: [{
+            nombre: "archivo v1 migrado",
+            cuenta: "1110401001",
+            cuentaLabel: "Nacionales",
+            totalMovimientos: (v1.movimientos || []).length,
+            fechaInforme: v1.fechaInforme,
+          }],
+          cuentasDetectadas: ["1110401001"],
+        };
+        setSaldosRaw(migrated);
+        saveToStorage(STORAGE_KEY_SALDOS, migrated);
+        try { localStorage.removeItem(STORAGE_KEY_COBRANZAS_V1); } catch (_) {}
       }
-    } catch (_) {}
+    }
   }, []);
 
-  // Primera carga y auto-refresh
   useEffect(() => {
     loadSheets().finally(() => setLoading(false));
   }, [loadSheets]);
@@ -84,36 +142,55 @@ export function useData() {
     return () => clearInterval(id);
   }, [loadSheets]);
 
-  // Procesar archivo de cobranzas subido
-  const uploadCobranzas = useCallback(async (file) => {
-    const procesado = await processCobranzasFile(file);
-    setCobranzasRaw(procesado);
-    try {
-      localStorage.setItem(STORAGE_KEY_COBRANZAS, JSON.stringify(procesado));
-    } catch (_) {}
+  // ─── Upload de archivos ───
+  const uploadSaldos = useCallback(async (files) => {
+    const fileArr = Array.from(files);
+    const procesado = await processFiles(fileArr);
+    setSaldosRaw(procesado);
+    saveToStorage(STORAGE_KEY_SALDOS, procesado);
     return procesado;
   }, []);
 
-  const clearCobranzas = useCallback(() => {
-    setCobranzasRaw(null);
-    try { localStorage.removeItem(STORAGE_KEY_COBRANZAS); } catch (_) {}
+  const uploadHistorico = useCallback(async (files) => {
+    const fileArr = Array.from(files);
+    const procesado = await processFiles(fileArr);
+    setHistoricoRaw(procesado);
+    saveToStorage(STORAGE_KEY_HISTORICO, procesado);
+    return procesado;
   }, []);
 
-  // Derivado: cobranzas computadas
+  const clearSaldos = useCallback(() => {
+    setSaldosRaw(null);
+    try { localStorage.removeItem(STORAGE_KEY_SALDOS); } catch (_) {}
+  }, []);
+
+  const clearHistorico = useCallback(() => {
+    setHistoricoRaw(null);
+    try { localStorage.removeItem(STORAGE_KEY_HISTORICO); } catch (_) {}
+  }, []);
+
+  // Derivado: cobranzas computadas a partir de SALDOS (no del histórico)
   const cobranzas = useMemo(() => {
-    if (!cobranzasRaw) return null;
-    return computeCobranzas(cobranzasRaw);
-  }, [cobranzasRaw]);
+    if (!saldosRaw) return null;
+    return computeCobranzas(saldosRaw);
+  }, [saldosRaw]);
 
   return {
     sheets,
     cobranzas,
-    cobranzasRaw,
+    saldosRaw,
+    historicoRaw,
     loading,
     error,
     lastUpdate,
     refresh: loadSheets,
-    uploadCobranzas,
-    clearCobranzas,
+    uploadSaldos,
+    uploadHistorico,
+    clearSaldos,
+    clearHistorico,
+    // Aliases de compatibilidad (por si algún componente aún usa los nombres viejos)
+    cobranzasRaw: saldosRaw,
+    uploadCobranzas: uploadSaldos,
+    clearCobranzas: clearSaldos,
   };
 }

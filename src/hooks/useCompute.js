@@ -4,11 +4,15 @@ import { getDapType } from "../utils/parsers.js";
 
 // ══════════════════════════════════════════════════════════════════════
 // MOTOR DE CRUCE DE DATOS
-// Responde las 3 preguntas clave de Miguel (pregunta #11 del chat):
-//
+// Responde las 3 preguntas clave de Miguel:
 //   1. Cuánto falta por completar en las semanas venideras
-//   2. Cuánto tenemos para responder
-//   3. Cuánto deberíamos recibir (por viajes del mes + facturas pendientes)
+//   2. Cuánto tenemos para responder (LIQUIDEZ OPERATIVA ESTRICTA)
+//   3. Cuánto deberíamos recibir por viajes + facturas pendientes
+//
+// Cambio v1.2: "Tenemos para responder" = caja bancaria + DAP Trabajo que
+// vence en ventana. Se EXCLUYEN FFMM, DAP Inversión y DAP Crédito porque
+// NO son para gastos de caja normales (FFMM es colchón, DAP Inv es colchón
+// largo plazo, DAP Cred está reservado para compra terrenos).
 // ══════════════════════════════════════════════════════════════════════
 
 export function useCompute(sheets, cobranzas) {
@@ -47,25 +51,44 @@ export function useCompute(sheets, cobranzas) {
     const dapTrab60 = dapVence(next60, "trabajo");
     const dapTrab90 = dapVence(next90, "trabajo");
     const dapInv30 = dapVence(next30, "inversion");
+    const dapInv60 = dapVence(next60, "inversion");
+    const dapInv90 = dapVence(next90, "inversion");
     const dapCred30 = dapVence(next30, "credito");
 
-    // Liquidez operativa = caja + DAP trabajo que vence en ventana + FFMM
-    // (DAP inversión: colchón solo si hace falta; DAP crédito: amarrado a compra terrenos)
-    const liquidez30 = totalCaja + dapTrab30 + totalFondos;
-    const liquidez60 = totalCaja + dapTrab60 + totalFondos;
-    const liquidez90 = totalCaja + dapTrab90 + totalFondos;
+    // ─── LIQUIDEZ OPERATIVA ESTRICTA ─── (v1.2)
+    // Solo caja bancaria + DAP Trabajo que vence en ventana.
+    // NO incluye FFMM, DAP Inv ni DAP Cred.
+    const liquidezOperativa30 = totalCaja + dapTrab30;
+    const liquidezOperativa60 = totalCaja + dapTrab60;
+    const liquidezOperativa90 = totalCaja + dapTrab90;
 
-    // Colchón (emergencia) = liquidez + DAP inversión
-    const colchon30 = liquidez30 + dapInv30;
+    // ─── COLCHÓN DISPONIBLE ─── (v1.2)
+    // Emergencia: lo que podríamos rescatar si la operación normal no alcanza.
+    // Se muestra aparte (nunca se mezcla con "para responder").
+    const colchonFFMM = totalFondos;
+    const colchonDAPInv = totalDAPInversion;
+    const colchonDAPCred = totalDAPCredito;
+    const colchonTotal = colchonFFMM + colchonDAPInv + colchonDAPCred;
+
+    // Desglose del colchón para UI colapsable
+    const colchonDesglose = [
+      { key: "ffmm", label: "Fondos mutuos", monto: colchonFFMM, costo: "Cero — liquidez inmediata", prioridad: 1 },
+      { key: "dap_inv", label: "DAP Inversión", monto: colchonDAPInv, costo: "Pierde tasa si se rompe antes", prioridad: 2 },
+      { key: "dap_cred", label: "DAP Crédito", monto: colchonDAPCred, costo: "Reservado para compra terrenos", prioridad: 3 },
+    ];
+
+    // Compatibilidad hacia atrás (por si algún componente aún los lee):
+    const liquidez30 = liquidezOperativa30;
+    const liquidez60 = liquidezOperativa60;
+    const liquidez90 = liquidezOperativa90;
+    const colchon30 = liquidezOperativa30 + colchonFFMM + dapInv30;
 
     // ─────────────────────────────────────────────
     // 2. COMPROMISOS — "cuánto falta por completar"
-    //    Lee el calendario financiero, usa tu columna "Falta"
     // ─────────────────────────────────────────────
     const cal = sheets.calendario || [];
     const calFuturos = cal.filter(r => r.fecha && r.fecha >= today);
 
-    // 4 semanas rodantes a partir de esta
     const semanas = [];
     const weekStart0 = startOfWeek(today);
     for (let w = 0; w < 4; w++) {
@@ -78,7 +101,6 @@ export function useCompute(sheets, cobranzas) {
       const falta = compSem.reduce((s, r) => s + r.falta, 0);
       const dapSem = (sheets.daps || []).filter(d => d.tipo === "trabajo" && d.vencimiento >= inicio && d.vencimiento <= fin);
       const dapSemMonto = dapSem.reduce((s, d) => s + (d.montoFinal || d.monto), 0);
-      const ingresosSem = (w === 0 ? totalCaja : 0) + dapSemMonto;
       semanas.push({
         semana: w + 1,
         inicio, fin,
@@ -90,7 +112,6 @@ export function useCompute(sheets, cobranzas) {
         falta,
         dapVence: dapSemMonto,
         dapCount: dapSem.length,
-        // Estado basado en tu columna "Falta" — tu control manual domina
         estado: compSem.length === 0 ? "vacia"
               : falta === 0 ? "cubierto"
               : falta < compMonto * 0.2 ? "ajustar"
@@ -103,22 +124,14 @@ export function useCompute(sheets, cobranzas) {
     const totalCompromisos90 = cal.filter(r => r.fecha >= today && r.fecha <= next90).reduce((s, r) => s + r.monto, 0);
     const totalFalta30 = cal.filter(r => r.fecha >= today && r.fecha <= next30).reduce((s, r) => s + r.falta, 0);
 
-    // Agregamos cuota leasing y cuota crédito proyectadas en ventana 30d
-    // (aunque ya deberían estar en calendario, por si hay gaps)
     const proximasLeasing = (sheets.leasing?.proxCuotas || []).slice(0, 3);
 
     // ─────────────────────────────────────────────
-    // 3. POR RECIBIR — "cuánto deberíamos cobrar"
-    //    Combina: facturas pendientes del archivo + proyección nueva facturación
+    // 3. POR RECIBIR
     // ─────────────────────────────────────────────
-
-    // 3.a ─ Proyección facturación mes N+1 usando viajes del mes actual
-    //       Lógica: tasa histórica $/viaje por cliente (año anterior, lag 1 mes)
-    //       aplicada a los viajes del mes en curso.
     const viajes = sheets.viajes || [];
     const ventas = sheets.ventas || [];
 
-    // Histórico año anterior: viajes mes N y facturación mes N+1, por cliente
     const viajesByClienteMesPrev = {};
     const ventasByClienteMesPrev = {};
     viajes.forEach(r => {
@@ -136,7 +149,6 @@ export function useCompute(sheets, cobranzas) {
       ventasByClienteMesPrev[k][m] += r.neto;
     });
 
-    // Tasa $/viaje por cliente: suma ventas mes m+1 / suma viajes mes m
     const tasaPorCliente = {};
     let globalV = 0, globalF = 0;
     Object.keys(viajesByClienteMesPrev).forEach(k => {
@@ -152,7 +164,6 @@ export function useCompute(sheets, cobranzas) {
     });
     const tasaGlobal = globalV > 0 ? globalF / globalV : 0;
 
-    // Aplicar tasas: viajes mes mV (año actual) → facturación esperada mes mV+1
     const facturacionProyectadaPorViajes = Array(12).fill(0);
     const desglosePorMesFactura = {};
     for (let mV = 0; mV < 12; mV++) {
@@ -177,34 +188,26 @@ export function useCompute(sheets, cobranzas) {
       desglosePorMesFactura[mF] = desglose.sort((a, b) => b.aporte - a.aporte);
     }
 
-    // Proyección facturación mes ACTUAL (lo que me falta por facturar en el mes en curso según viajes del mes anterior)
     const proyFacturacionMesActual = facturacionProyectadaPorViajes[curMonth] || 0;
-    // Proyección facturación mes SIGUIENTE (basada en viajes YA ejecutados este mes)
     const proyFacturacionMesSiguiente = curMonth < 11 ? (facturacionProyectadaPorViajes[curMonth + 1] || 0) : 0;
     const desgloseMesSiguiente = desglosePorMesFactura[curMonth + 1] || [];
 
-    // Cuánto ya facturé este mes (de lo real)
     const totalFacturadoMesActual = ventas
       .filter(r => r.fecha.getMonth() === curMonth && r.fecha.getFullYear() === curYear)
       .reduce((s, r) => s + r.neto, 0);
-    // Diferencia: cuánto todavía me falta por facturar este mes
     const faltaFacturarMesActual = Math.max(0, proyFacturacionMesActual - totalFacturadoMesActual);
 
-    // 3.b ─ Cobranza de facturas pendientes (del archivo subido)
-    //       Se agrupa por ventana temporal. EXCLUYE facturas críticas (>180 días
-    //       vencidas) — requieren cobranza especial y no son ingresos esperados.
     const cobranzaPorVentana = {
-      vencidas: { monto: 0, count: 0 },    // vencidas 1-180 días (gestionables)
+      vencidas: { monto: 0, count: 0 },
       prox30: { monto: 0, count: 0 },
       prox60: { monto: 0, count: 0 },
       prox90: { monto: 0, count: 0 },
       masAlla: { monto: 0, count: 0 },
-      criticas: { monto: 0, count: 0 },    // NUEVO: >180 días, NO suman a ingreso esperado
+      criticas: { monto: 0, count: 0 },
     };
     if (cobranzas) {
       Object.values(cobranzas.porCliente).forEach(c => {
         c.facturasPendientes.forEach(f => {
-          // Críticas (>180 días vencidas) no van a ninguna ventana de ingreso esperado
           if (f.critica) { cobranzaPorVentana.criticas.monto += f.monto; cobranzaPorVentana.criticas.count++; return; }
           const v = f.vencimiento;
           if (!v) { cobranzaPorVentana.prox30.monto += f.monto; cobranzaPorVentana.prox30.count++; return; }
@@ -217,18 +220,13 @@ export function useCompute(sheets, cobranzas) {
       });
     }
 
-    // 3.c ─ Cobranza total esperada 30/60/90 (existente + nuevas facturaciones)
-    //       Nuevas facturaciones del mes se cobran ~30-60 días después (usamos DSO global)
-    const dsoAsumido = cobranzas?.dsoGlobal || 35; // días promedio pago
-    // Lo que voy a facturar este mes (faltaFacturar) lo cobraré en ~30-45 días
-    // Lo que voy a facturar mes siguiente (proyFacturacionMesSiguiente) lo cobraré en ~60-75 días
-    // Simplificación: faltaFacturarMesActual se cobra en prox 30-60, proyFacturacionMesSiguiente en 60-90
+    const dsoAsumido = cobranzas?.dsoGlobal || 35;
     const cobranzaEsperada30 = cobranzaPorVentana.prox30.monto + cobranzaPorVentana.vencidas.monto;
     const cobranzaEsperada60 = cobranzaEsperada30 + cobranzaPorVentana.prox60.monto + (faltaFacturarMesActual * 0.5);
     const cobranzaEsperada90 = cobranzaEsperada60 + cobranzaPorVentana.prox90.monto + (faltaFacturarMesActual * 0.5) + (proyFacturacionMesSiguiente * 0.5);
 
     // ─────────────────────────────────────────────
-    // 4. LEASING Y CRÉDITO — proyección gasto próx 30/60/90
+    // 4. LEASING Y CRÉDITO
     // ─────────────────────────────────────────────
     const leasingCuotaMensual = sheets.leasing?.totalRow?.cuotaIVA || 0;
     const creditoCuotasFuturas = (sheets.credito || []).filter(r => r.fecha && r.fecha >= today);
@@ -238,25 +236,37 @@ export function useCompute(sheets, cobranzas) {
 
     // ─────────────────────────────────────────────
     // 5. RATIOS Y SALUD FINANCIERA
+    // Usamos liquidez operativa ESTRICTA (sin FFMM)
     // ─────────────────────────────────────────────
-    const coberturaRatio30 = totalCompromisos30 > 0 ? liquidez30 / totalCompromisos30 : null;
-    const coberturaRatio60 = totalCompromisos60 > 0 ? liquidez60 / totalCompromisos60 : null;
+    const coberturaRatio30 = totalCompromisos30 > 0 ? liquidezOperativa30 / totalCompromisos30 : null;
+    const coberturaRatio60 = totalCompromisos60 > 0 ? liquidezOperativa60 / totalCompromisos60 : null;
 
-    // Ingreso esperado 30d = cobranza esperada 30d
-    // Salida 30d = compromisos 30d
+    // Cobertura incluyendo colchón (informativa): si todo se rescata
+    const coberturaRatioConColchon30 = totalCompromisos30 > 0
+      ? (liquidezOperativa30 + colchonTotal) / totalCompromisos30
+      : null;
+
     const flujoNetoEsperado30 = (cobranzaEsperada30) - totalCompromisos30;
     const flujoNetoEsperado60 = (cobranzaEsperada60) - totalCompromisos60;
     const flujoNetoEsperado90 = (cobranzaEsperada90) - totalCompromisos90;
 
     return {
-      // Fechas
       today, curMonth, curYear, prevYear,
 
-      // Liquidez
+      // Liquidez operativa estricta (caja + DAP Trabajo)
       totalCaja, saldosBancos: sheets.saldosBancos || {},
       totalDAPTrabajo, totalDAPInversion, totalDAPCredito,
       totalFondos, fondos: sheets.fondos || [],
-      dapTrab30, dapTrab60, dapTrab90, dapInv30, dapCred30,
+      dapTrab30, dapTrab60, dapTrab90,
+      dapInv30, dapInv60, dapInv90, dapCred30,
+      dapsInversion: dapInversion, dapsCredito: dapCredito, dapsTrabajo: dapTrabajo,
+      liquidezOperativa30, liquidezOperativa60, liquidezOperativa90,
+
+      // Colchón (informativo, no entra en operativa)
+      colchonFFMM, colchonDAPInv, colchonDAPCred, colchonTotal,
+      colchonDesglose,
+
+      // Compatibilidad (alias de operativa estricta)
       liquidez30, liquidez60, liquidez90, colchon30,
       daps: sheets.daps || [],
 
@@ -278,7 +288,7 @@ export function useCompute(sheets, cobranzas) {
       facturacionProyectadaPorViajes,
 
       // Ratios
-      coberturaRatio30, coberturaRatio60,
+      coberturaRatio30, coberturaRatio60, coberturaRatioConColchon30,
       flujoNetoEsperado30, flujoNetoEsperado60, flujoNetoEsperado90,
     };
   }, [sheets, cobranzas]);
