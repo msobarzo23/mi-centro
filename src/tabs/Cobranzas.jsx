@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { SectionCard, KpiCard, StatusBadge, EmptyState } from "../components/common.jsx";
 import { FileUploader } from "../components/FileUploader.jsx";
-import { fmtM, fmtFull, fmtDateMed, fmtNum, normName, todayMidnight } from "../utils/format.js";
+import { fmtM, fmtFull, fmtDateMed, fmtNum, normName, todayMidnight } from "../utils/helpers_v2.js";
 
 export function Cobranzas({
   cobranzas, C,

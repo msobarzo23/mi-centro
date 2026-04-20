@@ -10,7 +10,7 @@ import { FileUploader } from "../components/FileUploader.jsx";
 import {
   fmtM, fmtFull, fmtPct, fmtNum, fmtDateMed, fmtDateLong, getSaludo,
   MESES_FULL, MESES_SHORT, pctChange,
-} from "../utils/format.js";
+} from "../utils/helpers_v2.js";
 
 export function Cockpit({
   C, cobranzas,

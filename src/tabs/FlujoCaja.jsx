@@ -12,7 +12,7 @@ import { SectionCard, KpiCard, DataTable, StatusBadge, EmptyState, ChartTooltip 
 import {
   fmtM, fmtFull, fmtDateMed, fmtDateShort, fmtPct, todayMidnight,
   startOfWeek, endOfWeek, MESES_SHORT,
-} from "../utils/format.js";
+} from "../utils/helpers_v2.js";
 import { buildSugerenciasRescate, formatPlan } from "../utils/rescate.js";
 
 export function FlujoCaja({ C, cobranzas }) {

@@ -7,7 +7,7 @@ import {
 import { SectionCard, KpiCard, StatusBadge } from "../components/common.jsx";
 import { FileUploader } from "../components/FileUploader.jsx";
 import { buildClientesMaestro, ESTADO_META } from "../utils/clientesMaestro.js";
-import { fmtM, fmtFull, fmtDateMed, fmtPct, fmtNum, MESES_SHORT, todayMidnight } from "../utils/format.js";
+import { fmtM, fmtFull, fmtDateMed, fmtPct, fmtNum, MESES_SHORT, todayMidnight } from "../utils/helpers_v2.js";
 
 export function Clientes360({
   saldosRaw, historicoRaw, cobranzas, sheets,
