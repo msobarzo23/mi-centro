@@ -1,755 +1,502 @@
-// src/tabs/Clientes360.jsx
-//
-// Tab #5: Clientes 360 — vista maestra por cliente.
-// Tabla sortable con sparkline + drawer lateral con detalle completo.
-//
-// Props esperadas:
-//   cobranzas  : objeto resultado de fileProcessor.computeCobranzas
-//   rawRows    : array de filas crudas del xlsx Defontana (ver patch fileProcessor.js)
-//   viajes     : opcional { porCliente: { [ficha]: { viajesMes, viajesMesAnterior, viajesPromedio6m, viajes12m } } }
-//   hoy        : opcional, Date (default new Date())
-
-import React, { useMemo, useState, useEffect } from 'react';
+import { useState, useMemo } from "react";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell,
-} from 'recharts';
-import {
-  X, Search, TrendingDown, TrendingUp, AlertTriangle, ArrowUpDown,
-  Briefcase, Calendar, DollarSign, Clock, Users, FileText,
-} from 'lucide-react';
-import { SectionCard, KpiCard, ChartTooltip } from '../components/common.jsx';
-import { fmtM, fmtFull } from '../utils/format.js';
-import { buildClientesMaestro, ESTADO_META } from '../utils/clientesMaestro.js';
+  Users, Search, Globe, Building2, TrendingUp, TrendingDown,
+  Clock, AlertTriangle, X, ChevronRight, Sparkles, Filter, BarChart3,
+  Calendar as CalendarIcon,
+} from "lucide-react";
+import { SectionCard, KpiCard, StatusBadge } from "../components/common.jsx";
+import { FileUploader } from "../components/FileUploader.jsx";
+import { buildClientesMaestro, ESTADO_META } from "../utils/clientesMaestro.js";
+import { fmtM, fmtFull, fmtDateMed, fmtPct, fmtNum, MESES_SHORT, todayMidnight } from "../utils/format.js";
 
-// ──────────────────────────────────────────────────────────────────────
-// Formatters locales
-// ──────────────────────────────────────────────────────────────────────
+export function Clientes360({
+  saldosRaw, historicoRaw, cobranzas, sheets,
+  uploadSaldos, clearSaldos,
+  uploadHistorico, clearHistorico,
+}) {
+  const [selected, setSelected] = useState(null);
+  const [search, setSearch] = useState("");
+  const [filterEstado, setFilterEstado] = useState("todos");
+  const [filterCuenta, setFilterCuenta] = useState("todos"); // todos | nacional | internacional
 
-const fmtPct = (n, digits = 1) => (n == null || isNaN(n) ? '—' : `${n.toFixed(digits)}%`);
-const fmtInt = n => (n == null || isNaN(n) ? '—' : Math.round(n).toLocaleString('es-CL'));
-const fmtDate = d => {
-  if (!d) return '—';
-  const dt = d instanceof Date ? d : new Date(d);
-  if (isNaN(dt)) return '—';
-  return dt.toLocaleDateString('es-CL', { day: '2-digit', month: '2-digit', year: 'numeric' });
-};
-const mesCorto = (ym) => {
-  const [y, m] = ym.split('-');
-  const nombres = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
-  return `${nombres[parseInt(m, 10) - 1]}-${y.slice(2)}`;
-};
+  const maestro = useMemo(() => {
+    if (!saldosRaw) return null;
+    return buildClientesMaestro({
+      rawRows: saldosRaw?.movimientos || [],
+      historicoRows: historicoRaw?.movimientos || [],
+      cobranzas,
+      viajes: null,
+      hoy: todayMidnight(),
+    });
+  }, [saldosRaw, historicoRaw, cobranzas]);
 
-// ──────────────────────────────────────────────────────────────────────
-// Sub-componentes
-// ──────────────────────────────────────────────────────────────────────
-
-function Sparkline({ data, color = 'var(--accent)', w = 120, h = 28 }) {
-  // data = array de números (12 meses)
-  if (!data || data.length === 0) return <span style={{ color: 'var(--fg-dim, var(--fg))' }}>—</span>;
-  const max = Math.max(...data, 1);
-  const min = 0;
-  const range = max - min || 1;
-  const stepX = w / (data.length - 1 || 1);
-  const points = data.map((v, i) => {
-    const x = i * stepX;
-    const y = h - ((v - min) / range) * h;
-    return [x, y];
-  });
-  const path = points.map((p, i) => (i === 0 ? `M${p[0]},${p[1]}` : `L${p[0]},${p[1]}`)).join(' ');
-  const last = points[points.length - 1];
-  const hasData = data.some(v => v > 0);
-
-  return (
-    <svg width={w} height={h} style={{ display: 'block' }}>
-      {hasData && (
-        <>
-          <path d={path} stroke={color} strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-          <circle cx={last[0]} cy={last[1]} r="2.5" fill={color} />
-        </>
-      )}
-      {!hasData && (
-        <line x1="0" y1={h / 2} x2={w} y2={h / 2} stroke="var(--border)" strokeDasharray="2,2" strokeWidth="1" />
-      )}
-    </svg>
-  );
-}
-
-function EstadoBadge({ estado, compact = false }) {
-  const meta = ESTADO_META[estado] || ESTADO_META.activo;
-  return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        padding: compact ? '2px 8px' : '4px 10px',
-        borderRadius: 999,
-        background: meta.bg,
-        color: meta.color,
-        fontSize: compact ? 11 : 12,
-        fontWeight: 600,
-        whiteSpace: 'nowrap',
-        letterSpacing: 0.2,
-      }}
-    >
-      <span style={{ width: 6, height: 6, borderRadius: '50%', background: meta.color }} />
-      {meta.label}
-    </span>
-  );
-}
-
-function Heatmap({ facturacion12m, viajes12m, metrica, meses12m }) {
-  const raw = metrica === 'viajes' ? (viajes12m || []) : (facturacion12m || []);
-  // Normalizar a array de números de longitud 12
-  let valores;
-  if (metrica === 'viajes') {
-    if (!viajes12m) {
-      return <div style={{ fontSize: 12, color: 'var(--fg-dim, var(--fg))', padding: '12px 0' }}>Sin datos de viajes operacionales conectados.</div>;
-    }
-    const map = new Map(viajes12m.map(v => [v.mes, v.n || 0]));
-    valores = meses12m.map(m => map.get(m) || 0);
-  } else {
-    valores = facturacion12m.map(x => x.monto);
+  // Onboarding si no hay saldos
+  if (!saldosRaw || !maestro) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 720 }}>
+        <div>
+          <h1 className="serif" style={{ fontSize: 28, fontWeight: 700, color: "var(--tx)", letterSpacing: -1, marginBottom: 4 }}>
+            Clientes 360
+          </h1>
+          <p style={{ fontSize: 13, color: "var(--tx-muted)" }}>
+            Vista unificada: facturación mensual, DSO real, aging, tendencia vs trimestre anterior y estado clasificado.
+          </p>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--tx)", marginBottom: 8 }}>Saldos actuales (requerido)</div>
+            <FileUploader onUpload={uploadSaldos} onClear={clearSaldos} current={saldosRaw} title="Sube los saldos" />
+          </div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--tx)", marginBottom: 8 }}>Histórico largo (muy recomendado)</div>
+            <FileUploader onUpload={uploadHistorico} onClear={clearHistorico} current={historicoRaw} title="Sube el histórico" description="Informe amplio (1 año+) — solo para clasificación correcta." />
+          </div>
+        </div>
+      </div>
+    );
   }
-  const max = Math.max(...valores, 1);
-  const colorBase = metrica === 'viajes' ? [8, 145, 178] : [217, 119, 6];
+
+  const clientes = maestro.clientes || [];
+
+  const clientesFiltrados = clientes.filter(c => {
+    if (search && !c.nombre.toLowerCase().includes(search.toLowerCase())) return false;
+    if (filterEstado !== "todos" && c.estado !== filterEstado) return false;
+    if (filterCuenta === "nacional" && c.esInternacional) return false;
+    if (filterCuenta === "internacional" && !c.esInternacional) return false;
+    return true;
+  });
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 4 }}>
-        {valores.map((v, i) => {
-          const intensity = v > 0 ? 0.15 + 0.85 * Math.sqrt(v / max) : 0;
-          const bg = v > 0
-            ? `rgba(${colorBase[0]}, ${colorBase[1]}, ${colorBase[2]}, ${intensity})`
-            : 'var(--border)';
-          return (
-            <div
-              key={meses12m[i]}
-              title={`${mesCorto(meses12m[i])}: ${metrica === 'viajes' ? fmtInt(v) : fmtM(v)}`}
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 20, flexWrap: "wrap" }}>
+        <div>
+          <h1 className="serif" style={{ fontSize: 28, fontWeight: 700, color: "var(--tx)", letterSpacing: -1, marginBottom: 4 }}>
+            Clientes 360
+          </h1>
+          <p style={{ fontSize: 13, color: "var(--tx-muted)" }}>
+            {clientes.length} clientes · {maestro.totales.nClientesActivos3m} activos últ. 3m · {maestro.totales.nInternacionales} internacionales
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <FileUploader compact current={saldosRaw} onUpload={uploadSaldos} />
+          {historicoRaw && (
+            <FileUploader compact current={historicoRaw} onUpload={uploadHistorico} />
+          )}
+        </div>
+      </div>
+
+      {/* Banner: histórico activo */}
+      {maestro.usandoHistoricoLargo ? (
+        <div style={{
+          display: "inline-flex",
+          alignSelf: "flex-start",
+          alignItems: "center",
+          gap: 8,
+          padding: "8px 14px",
+          background: "var(--violet-bg)",
+          border: "1px solid var(--violet)33",
+          borderRadius: 10,
+          fontSize: 11.5,
+          color: "var(--violet)",
+        }}>
+          <Clock size={12} />
+          <span>
+            Clasificación usando histórico largo:{" "}
+            <strong>{maestro.historicoFechaMin ? fmtDateMed(maestro.historicoFechaMin) : "?"} → {maestro.historicoFechaMax ? fmtDateMed(maestro.historicoFechaMax) : "?"}</strong>
+            {" "}({Math.round(maestro.historicoCubreDias)} días)
+          </span>
+        </div>
+      ) : historicoRaw ? null : (
+        <div style={{
+          display: "inline-flex",
+          alignSelf: "flex-start",
+          alignItems: "center",
+          gap: 8,
+          padding: "8px 14px",
+          background: "var(--amber-bg)",
+          border: "1px solid var(--amber-border)",
+          borderRadius: 10,
+          fontSize: 11.5,
+          color: "var(--amber)",
+        }}>
+          <AlertTriangle size={12} />
+          <span>
+            Clasificación con archivo actual únicamente ({Math.round(maestro.historicoCubreDias || 0)} días). Sube un histórico largo para clasificar correctamente clientes como MAXAM, ENAEX, Calidra.
+          </span>
+        </div>
+      )}
+
+      {/* KPIs */}
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <KpiCard icon={Users} label="Clientes totales" value={fmtNum(clientes.length)} sub={`${maestro.totales.nClientesConSaldo} con saldo pendiente`} color="var(--accent)" colorBg="var(--accent-bg)" highlight />
+        <KpiCard icon={TrendingUp} label="Facturación últ. 3m" value={fmtM(maestro.totales.facturacion3m)} sub={`${maestro.totales.nClientesActivos3m} clientes activos`} color="var(--green)" colorBg="var(--green-bg)" />
+        <KpiCard icon={BarChart3} label="Facturación 12m" value={fmtM(maestro.totales.facturacion12m)} sub="Rolling últimos 12 meses" color="var(--teal)" colorBg="var(--teal-bg)" />
+        <KpiCard icon={AlertTriangle} label="Saldo crítico" value={fmtM(maestro.totales.saldoCritico)} sub="Facturas +180 días (cobranza especial)" color="var(--violet)" colorBg="var(--violet-bg)" />
+      </div>
+
+      {/* Distribución por estado */}
+      <SectionCard title="Distribución por estado" subtitle="Click en un estado para filtrar" icon={Sparkles} color="var(--accent)">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
+          {Object.entries(ESTADO_META).map(([key, meta]) => {
+            const count = maestro.distribucionEstado[key] || 0;
+            const active = filterEstado === key;
+            return (
+              <button
+                key={key}
+                onClick={() => setFilterEstado(active ? "todos" : key)}
+                style={{
+                  background: active ? meta.bg : "var(--bg-surface)",
+                  border: `1px solid ${active ? meta.color : "var(--border)"}`,
+                  borderRadius: 10,
+                  padding: "12px 14px",
+                  textAlign: "left",
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                  transition: "all 0.15s",
+                  position: "relative",
+                  overflow: "hidden",
+                  opacity: count === 0 ? 0.5 : 1,
+                }}
+              >
+                <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: meta.color, opacity: active ? 1 : 0.6 }} />
+                <div style={{ fontSize: 10.5, color: "var(--tx-muted)", fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase", marginBottom: 6 }}>
+                  {meta.label}
+                </div>
+                <div className="serif" style={{ fontSize: 22, fontWeight: 700, color: count > 0 ? meta.color : "var(--tx-faint)", letterSpacing: -0.5 }}>
+                  {count}
+                </div>
+                <div style={{ fontSize: 10, color: "var(--tx-muted)", marginTop: 3, lineHeight: 1.4 }}>
+                  {meta.desc}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </SectionCard>
+
+      {/* Filtros */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", flex: "1 1 280px", maxWidth: 420 }}>
+          <Search size={12} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--tx-muted)" }} />
+          <input
+            type="text"
+            placeholder="Buscar cliente..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            style={{
+              width: "100%", padding: "8px 12px 8px 30px",
+              fontSize: 12.5, background: "var(--bg-surface)",
+              border: "1px solid var(--border)", borderRadius: 8,
+              color: "var(--tx)", fontFamily: "inherit", outline: "none",
+            }}
+          />
+        </div>
+        <div style={{ display: "flex", gap: 4, padding: 3, background: "var(--bg-surface-2)", borderRadius: 8, border: "1px solid var(--border)" }}>
+          {[
+            { id: "todos", label: "Todos" },
+            { id: "nacional", label: "Nacionales" },
+            { id: "internacional", label: "Internacionales" },
+          ].map(f => (
+            <button
+              key={f.id}
+              onClick={() => setFilterCuenta(f.id)}
               style={{
-                aspectRatio: '1',
-                borderRadius: 6,
-                background: bg,
-                display: 'flex',
-                alignItems: 'flex-end',
-                justifyContent: 'center',
-                padding: 4,
-                fontSize: 9,
-                color: intensity > 0.5 ? 'white' : 'var(--fg-dim, var(--fg))',
-                fontFamily: 'JetBrains Mono, monospace',
-                fontVariantNumeric: 'tabular-nums',
-                fontWeight: 600,
-                minHeight: 44,
+                padding: "5px 11px",
+                background: filterCuenta === f.id ? "var(--bg-surface)" : "transparent",
+                border: "1px solid " + (filterCuenta === f.id ? "var(--border-strong)" : "transparent"),
+                borderRadius: 6, fontSize: 11,
+                color: filterCuenta === f.id ? "var(--tx)" : "var(--tx-muted)",
+                cursor: "pointer", fontFamily: "inherit",
+                fontWeight: filterCuenta === f.id ? 600 : 500,
               }}
             >
-              {v > 0 ? (metrica === 'viajes' ? v : fmtM(v, 0).replace('$', '')) : ''}
-            </div>
-          );
-        })}
+              {f.label}
+            </button>
+          ))}
+        </div>
+        {(filterEstado !== "todos" || filterCuenta !== "todos") && (
+          <button
+            onClick={() => { setFilterEstado("todos"); setFilterCuenta("todos"); }}
+            style={{ padding: "5px 11px", background: "transparent", border: "1px solid var(--border)", borderRadius: 6, fontSize: 11, color: "var(--tx-muted)", cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4 }}
+          >
+            <X size={10} /> Limpiar filtros
+          </button>
+        )}
+        <div style={{ fontSize: 11, color: "var(--tx-muted)", marginLeft: "auto" }}>
+          {clientesFiltrados.length} de {clientes.length}
+        </div>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 4, fontSize: 10, color: 'var(--fg-dim, var(--fg))', textAlign: 'center' }}>
-        {meses12m.map(m => <div key={m}>{mesCorto(m)}</div>)}
-      </div>
+
+      {/* Lista de clientes */}
+      <SectionCard title="Lista de clientes" icon={Users} color="var(--accent)">
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr>
+                {["Cliente", "", "Estado", "Fact. últ. 3m", "Δ vs 3m ant.", "Saldo pend.", "DSO", "Última factura", ""].map((h, i) => (
+                  <th key={i} style={{
+                    padding: "10px 10px", textAlign: i <= 2 ? "left" : "right",
+                    color: "var(--tx-muted)", fontWeight: 600, fontSize: 10.5,
+                    borderBottom: "1px solid var(--border)", textTransform: "uppercase",
+                    letterSpacing: 0.6, whiteSpace: "nowrap",
+                  }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {clientesFiltrados.slice(0, 100).map((c, i) => {
+                const meta = ESTADO_META[c.estado] || ESTADO_META.activo;
+                const delta = c.deltaPctVs3mAnterior;
+                return (
+                  <tr
+                    key={i}
+                    onClick={() => setSelected(c)}
+                    style={{ borderBottom: "1px solid var(--border)", cursor: "pointer" }}
+                    onMouseEnter={e => e.currentTarget.style.background = "var(--bg-surface-2)"}
+                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                  >
+                    <td style={{ padding: "10px 10px", color: "var(--tx)", fontWeight: 500, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {c.nombre}
+                    </td>
+                    <td style={{ padding: "10px 4px" }}>
+                      {c.esInternacional && (
+                        <span title="Internacional" style={{ display: "inline-flex", padding: "2px 6px", background: "var(--blue-bg)", color: "var(--blue)", borderRadius: 4, fontSize: 9, fontWeight: 700 }}>
+                          <Globe size={9} />
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ padding: "10px 10px" }}>
+                      <span style={{
+                        display: "inline-flex", padding: "2px 8px",
+                        background: meta.bg, color: meta.color,
+                        borderRadius: 999, fontSize: 10, fontWeight: 700,
+                        letterSpacing: 0.3,
+                      }}>
+                        {meta.label}
+                      </span>
+                    </td>
+                    <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: c.facturacionUlt3m > 0 ? "var(--tx)" : "var(--tx-faint)", fontWeight: 600 }}>
+                      {c.facturacionUlt3m > 0 ? fmtM(c.facturacionUlt3m) : "—"}
+                    </td>
+                    <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: deltaColor(delta) }}>
+                      {delta != null ? `${delta > 0 ? "+" : ""}${Math.round(delta)}%` : "—"}
+                    </td>
+                    <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: c.saldoTotal > 0 ? "var(--tx)" : "var(--tx-faint)" }}>
+                      {c.saldoTotal > 0 ? fmtM(c.saldoTotal) : "—"}
+                    </td>
+                    <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: dsoColor(c.dsoProm) }}>
+                      {c.dsoProm != null ? Math.round(c.dsoProm) + "d" : "—"}
+                    </td>
+                    <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: "var(--tx-muted)", fontSize: 11 }}>
+                      {c.ultimaFactura ? fmtDateMed(c.ultimaFactura) : "—"}
+                    </td>
+                    <td style={{ padding: "10px 10px", color: "var(--tx-muted)" }}>
+                      <ChevronRight size={13} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {clientesFiltrados.length > 100 && (
+          <div style={{ fontSize: 11, color: "var(--tx-muted)", textAlign: "center", marginTop: 10 }}>
+            Mostrando los primeros 100 de {clientesFiltrados.length}.
+          </div>
+        )}
+      </SectionCard>
+
+      {selected && <ClienteDrawer cliente={selected} maestro={maestro} onClose={() => setSelected(null)} />}
     </div>
   );
 }
 
-function ClienteDrawer({ cliente, onClose, meses12m }) {
-  const [metricaHeatmap, setMetricaHeatmap] = useState('facturacion');
+// ══════════════════════════════════════════════════════════════════════
 
-  useEffect(() => {
-    const onKey = e => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    // bloquear scroll body
-    document.body.style.overflow = 'hidden';
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      document.body.style.overflow = '';
-    };
-  }, [onClose]);
-
-  if (!cliente) return null;
-
+function ClienteDrawer({ cliente, maestro, onClose }) {
   const meta = ESTADO_META[cliente.estado] || ESTADO_META.activo;
-
-  // Datos del bar chart
-  const barData = cliente.facturacionMensual.map(x => ({
-    mes: mesCorto(x.mes),
-    monto: x.monto,
-    fullMes: x.mes,
-  }));
-
-  // Top 10 facturas pendientes por monto
-  const topFacturas = [...(cliente.facturasPendientes || [])]
-    .sort((a, b) => b.monto - a.monto)
-    .slice(0, 10);
-
-  const colorAging = (dias, critica) => {
-    if (critica || dias > 180) return '#7c3aed';
-    if (dias > 90) return '#dc2626';
-    if (dias > 30) return '#ea580c';
-    if (dias > 0) return '#d97706';
-    return 'var(--fg-dim, var(--fg))';
-  };
+  const heatMax = Math.max(...cliente.facturacionMensual.map(m => m.monto), 1);
 
   return (
-    <>
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50, display: "flex", justifyContent: "flex-end", backdropFilter: "blur(3px)" }}>
       <div
-        onClick={onClose}
+        onClick={e => e.stopPropagation()}
         style={{
-          position: 'fixed', inset: 0,
-          background: 'rgba(0,0,0,.55)',
-          zIndex: 90,
-          animation: 'c360-fadeIn 180ms ease-out',
-        }}
-      />
-      <div
-        style={{
-          position: 'fixed', top: 0, right: 0, bottom: 0,
-          width: 'min(640px, 100vw)',
-          background: 'var(--bg-elev, var(--bg))',
-          borderLeft: '1px solid var(--border)',
-          boxShadow: '-20px 0 60px rgba(0,0,0,.35)',
-          zIndex: 91,
-          overflowY: 'auto',
-          animation: 'c360-slideIn 220ms cubic-bezier(.25,.8,.25,1)',
+          width: "min(760px, 100%)", height: "100%",
+          background: "var(--bg)", borderLeft: "1px solid var(--border)",
+          overflowY: "auto", padding: "20px 24px",
         }}
       >
-        {/* Header sticky */}
-        <div style={{
-          position: 'sticky', top: 0, zIndex: 2,
-          background: 'var(--bg-elev, var(--bg))',
-          borderBottom: '1px solid var(--border)',
-          padding: '18px 24px 16px',
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontFamily: 'Fraunces, serif', fontSize: 22, fontWeight: 600, lineHeight: 1.15, marginBottom: 4, color: 'var(--fg)' }}>
-                {cliente.nombre}
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--fg-dim, var(--fg))', fontFamily: 'JetBrains Mono, monospace' }}>
-                {cliente.idFicha || 'RUT no disponible'}
-              </div>
-              <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <EstadoBadge estado={cliente.estado} />
-                {cliente.esGrande && (
-                  <span style={{ fontSize: 11, color: 'var(--fg-dim, var(--fg))', padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 999 }}>
-                    {fmtPct(cliente.participacion * 100)} de cartera
-                  </span>
-                )}
-              </div>
+        {/* Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, gap: 12 }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+              {cliente.esInternacional ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", background: "var(--blue-bg)", color: "var(--blue)", borderRadius: 999, fontSize: 10, fontWeight: 700 }}>
+                  <Globe size={9} /> INTERNACIONAL
+                </span>
+              ) : (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", background: "var(--accent-bg)", color: "var(--accent)", borderRadius: 999, fontSize: 10, fontWeight: 700 }}>
+                  <Building2 size={9} /> NACIONAL
+                </span>
+              )}
+              <span style={{ display: "inline-flex", padding: "2px 8px", background: meta.bg, color: meta.color, borderRadius: 999, fontSize: 10, fontWeight: 700 }}>
+                {meta.label}
+              </span>
             </div>
-            <button
-              onClick={onClose}
-              style={{
-                background: 'transparent', border: '1px solid var(--border)', borderRadius: 8,
-                padding: 8, cursor: 'pointer', color: 'var(--fg)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}
-              aria-label="Cerrar"
-            >
-              <X size={16} />
-            </button>
+            <h2 className="serif" style={{ fontSize: 22, fontWeight: 700, color: "var(--tx)", letterSpacing: -0.6, marginBottom: 4 }}>{cliente.nombre}</h2>
+            {cliente.idFicha && <div style={{ fontSize: 11, color: "var(--tx-muted)", fontFamily: "var(--mono)" }}>{cliente.idFicha}</div>}
           </div>
-          <div style={{
-            marginTop: 12, padding: '10px 12px',
-            background: meta.bg,
-            borderRadius: 8,
-            fontSize: 12, color: meta.color, lineHeight: 1.45,
-          }}>
-            {meta.desc}
-          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 8, padding: 6, cursor: "pointer", color: "var(--tx-muted)", display: "flex" }}>
+            <X size={14} />
+          </button>
         </div>
 
-        <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 24 }}>
-          {/* KPIs */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
-            <MiniKpi icon={<DollarSign size={14} />} label="Facturación 12m" value={fmtM(cliente.facturacionUlt12m)} />
-            <MiniKpi icon={<Briefcase size={14} />} label="Prom. mensual (6m)" value={fmtM(cliente.promedioMensual6m)} />
-            <MiniKpi
-              icon={<Clock size={14} />}
-              label={cliente.dsoProm != null ? 'DSO real (FIFO)' : 'DSO efectivo'}
-              value={cliente.dsoProm != null
-                ? `${Math.round(cliente.dsoProm)} días`
-                : (cliente.dsoEfectivo != null ? `~${Math.round(cliente.dsoEfectivo)} días` : '—')}
-              sub={cliente.dsoProm != null ? `${cliente.nPagosObservados} pagos observados` : null}
-            />
-            <MiniKpi
-              icon={<FileText size={14} />}
-              label="Saldo pendiente"
-              value={fmtM(cliente.saldoTotal)}
-              sub={cliente.saldoCritico > 0 ? `${fmtM(cliente.saldoCritico)} crítico` : null}
-              subColor={cliente.saldoCritico > 0 ? '#7c3aed' : null}
-            />
-          </div>
+        {/* Descripción estado */}
+        <div style={{ padding: "10px 14px", background: meta.bg, borderRadius: 8, marginBottom: 16, fontSize: 12, color: meta.color, lineHeight: 1.5 }}>
+          <strong style={{ fontWeight: 700 }}>{meta.label}:</strong> {meta.desc}
+        </div>
 
-          {/* Alertas */}
-          {cliente.alertas && cliente.alertas.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {/* Alertas */}
+        {cliente.alertas && cliente.alertas.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 10.5, color: "var(--tx-muted)", fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase", marginBottom: 6 }}>Alertas</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {cliente.alertas.map((a, i) => (
-                <div key={i} style={{
-                  display: 'flex', alignItems: 'flex-start', gap: 10,
-                  padding: '10px 12px', background: 'rgba(217, 119, 6, 0.08)',
-                  borderLeft: '3px solid #d97706', borderRadius: 6,
-                  fontSize: 13, color: 'var(--fg)',
-                }}>
-                  <AlertTriangle size={14} style={{ marginTop: 2, color: '#d97706', flexShrink: 0 }} />
-                  <span>{a.msg}</span>
+                <div key={i} style={{ padding: "8px 12px", background: "var(--bg-surface-2)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11.5, color: "var(--tx-muted)", display: "flex", alignItems: "center", gap: 8 }}>
+                  <AlertTriangle size={12} color="var(--amber)" />
+                  {a.msg}
                 </div>
               ))}
             </div>
-          )}
-
-          {/* Heatmap con toggle */}
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--fg)' }}>
-                Histórico 12 meses
-              </div>
-              <div style={{ display: 'flex', gap: 0, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
-                {['facturacion', 'viajes'].map(k => (
-                  <button
-                    key={k}
-                    onClick={() => setMetricaHeatmap(k)}
-                    style={{
-                      padding: '5px 12px', fontSize: 11, fontWeight: 600,
-                      background: metricaHeatmap === k ? 'var(--accent)' : 'transparent',
-                      color: metricaHeatmap === k ? 'white' : 'var(--fg-dim, var(--fg))',
-                      border: 'none', cursor: 'pointer',
-                      textTransform: 'capitalize',
-                    }}
-                  >
-                    {k}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <Heatmap
-              facturacion12m={cliente.facturacionMensual}
-              viajes12m={cliente.viajes12m}
-              metrica={metricaHeatmap}
-              meses12m={meses12m}
-            />
           </div>
+        )}
 
-          {/* Gráfico barras mensual */}
-          <div>
-            <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--fg)', marginBottom: 10 }}>
-              Facturación mensual
-            </div>
-            <div style={{ height: 180, width: '100%' }}>
-              <ResponsiveContainer>
-                <BarChart data={barData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
-                  <CartesianGrid stroke="var(--border)" vertical={false} strokeDasharray="2 2" />
-                  <XAxis dataKey="mes" tick={{ fontSize: 10, fill: 'var(--fg-dim, var(--fg))' }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize: 10, fill: 'var(--fg-dim, var(--fg))' }} axisLine={false} tickLine={false}
-                    tickFormatter={v => fmtM(v, 0).replace('$', '')} width={40} />
-                  <Tooltip content={<ChartTooltip valueFormatter={fmtFull} />} cursor={{ fill: 'rgba(217,119,6,0.08)' }} />
-                  <Bar dataKey="monto" fill="var(--accent)" radius={[3, 3, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+        {/* Stats */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 20 }}>
+          <MiniStat label="Fact. últ. 3m" value={fmtM(cliente.facturacionUlt3m)} />
+          <MiniStat
+            label="Δ vs 3m anterior"
+            value={cliente.deltaPctVs3mAnterior != null ? `${cliente.deltaPctVs3mAnterior > 0 ? "+" : ""}${Math.round(cliente.deltaPctVs3mAnterior)}%` : "—"}
+            color={deltaColor(cliente.deltaPctVs3mAnterior)}
+          />
+          <MiniStat label="Fact. 12m" value={fmtM(cliente.facturacionUlt12m)} />
+          <MiniStat label="Saldo pendiente" value={fmtM(cliente.saldoTotal)} color={cliente.saldoTotal > 0 ? "var(--accent)" : "var(--tx-faint)"} />
+          <MiniStat label="DSO real" value={cliente.dsoProm != null ? `${Math.round(cliente.dsoProm)}d` : "—"} sub={cliente.nPagosObservados > 0 ? `${cliente.nPagosObservados} pagos` : "sin muestra"} color={dsoColor(cliente.dsoProm)} />
+          <MiniStat label="Meses activos 12m" value={`${cliente.mesesConFacturacion12m}/12`} />
+          <MiniStat label="Última factura" value={cliente.ultimaFactura ? fmtDateMed(cliente.ultimaFactura) : "—"} sub={cliente.diasDesdeUltimaVenta != null ? `hace ${cliente.diasDesdeUltimaVenta}d` : ""} />
+          <MiniStat label="Primera factura" value={cliente.primeraFactura ? fmtDateMed(cliente.primeraFactura) : "—"} sub={cliente.primeraFacturaDiasAtras != null ? `hace ${cliente.primeraFacturaDiasAtras}d` : ""} />
+          <MiniStat label="Participación" value={`${((cliente.participacion || 0) * 100).toFixed(1)}%`} sub="De facturación 3m" />
+        </div>
+
+        {/* Heatmap 12 meses */}
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 10.5, color: "var(--tx-muted)", fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+            <CalendarIcon size={11} /> Facturación mensual (últ. 12 meses)
           </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 4 }}>
+            {cliente.facturacionMensual.map((m, i) => {
+              const intensity = m.monto / heatMax;
+              const bg = m.monto === 0
+                ? "var(--bg-surface-2)"
+                : `rgba(217, 119, 6, ${0.15 + intensity * 0.65})`;
+              const [year, month] = m.mes.split("-");
+              return (
+                <div
+                  key={i}
+                  title={`${m.mes}: ${fmtFull(m.monto)}`}
+                  style={{
+                    background: bg,
+                    border: `1px solid ${m.monto > 0 ? "var(--accent)" : "var(--border)"}`,
+                    borderRadius: 6,
+                    padding: "8px 4px",
+                    textAlign: "center",
+                    cursor: "default",
+                  }}
+                >
+                  <div style={{ fontSize: 9, color: "var(--tx-muted)", textTransform: "uppercase", letterSpacing: 0.3, fontWeight: 600 }}>
+                    {MESES_SHORT[parseInt(month, 10) - 1]}
+                  </div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: m.monto > 0 ? "var(--tx)" : "var(--tx-faint)", marginTop: 2, fontVariantNumeric: "tabular-nums" }}>
+                    {m.monto > 0 ? fmtM(m.monto).replace("$", "") : "—"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
 
-          {/* Top facturas pendientes */}
-          {topFacturas.length > 0 && (
-            <div>
-              <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--fg)', marginBottom: 10 }}>
-                Facturas pendientes — top {topFacturas.length}
-              </div>
-              <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
-                <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr style={{ background: 'var(--bg)', color: 'var(--fg-dim, var(--fg))', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                      <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 500 }}>Folio</th>
-                      <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 500 }}>Emisión</th>
-                      <th style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 500 }}>Vence</th>
-                      <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 500 }}>Monto</th>
-                      <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 500 }}>Atraso</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {topFacturas.map((f, i) => (
-                      <tr key={`${f.folio}-${i}`} style={{ borderTop: '1px solid var(--border)' }}>
-                        <td style={{ padding: '8px 10px', fontFamily: 'JetBrains Mono, monospace' }}>{f.folio}</td>
-                        <td style={{ padding: '8px 10px', color: 'var(--fg-dim, var(--fg))' }}>{fmtDate(f.fecha)}</td>
-                        <td style={{ padding: '8px 10px', color: 'var(--fg-dim, var(--fg))' }}>{fmtDate(f.vencimiento)}</td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums' }}>
-                          {fmtFull(f.monto)}
-                        </td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums', color: colorAging(f.diasAtraso, f.critica), fontWeight: 600 }}>
-                          {f.diasAtraso > 0 ? `+${f.diasAtraso}d` : (f.diasAtraso === 0 ? 'hoy' : `${Math.abs(f.diasAtraso)}d`)}
-                        </td>
-                      </tr>
+        {/* Facturas pendientes */}
+        {cliente.facturasPendientes && cliente.facturasPendientes.length > 0 && (
+          <div>
+            <div style={{ fontSize: 10.5, color: "var(--tx-muted)", fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase", marginBottom: 8 }}>
+              Facturas pendientes ({cliente.facturasPendientes.length})
+            </div>
+            <div style={{ background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+                <thead>
+                  <tr>
+                    {["Folio", "Vencimiento", "Atraso", "Monto", "Estado"].map((h, i) => (
+                      <th key={i} style={{ padding: "7px 10px", textAlign: i === 0 || i === 1 ? "left" : i === 4 ? "right" : "right", color: "var(--tx-muted)", fontSize: 10, fontWeight: 600, borderBottom: "1px solid var(--border)", textTransform: "uppercase", letterSpacing: 0.4 }}>
+                        {h}
+                      </th>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-              {(cliente.facturasPendientes || []).length > 10 && (
-                <div style={{ marginTop: 8, fontSize: 11, color: 'var(--fg-dim, var(--fg))', textAlign: 'right' }}>
-                  Mostrando 10 de {cliente.facturasPendientes.length} facturas pendientes
+                  </tr>
+                </thead>
+                <tbody>
+                  {cliente.facturasPendientes.slice(0, 20).map((f, i) => (
+                    <tr key={i} style={{ borderBottom: "1px solid var(--border)", background: f.critica ? "var(--violet-bg)" : "transparent" }}>
+                      <td style={{ padding: "6px 10px", color: "var(--tx-muted)", fontFamily: "var(--mono)" }}>{f.folio || "—"}</td>
+                      <td style={{ padding: "6px 10px", color: "var(--tx-muted)" }}>{f.vencimiento ? fmtDateMed(f.vencimiento) : "—"}</td>
+                      <td className="tabular" style={{ padding: "6px 10px", textAlign: "right", color: f.diasAtraso > 0 ? "var(--red)" : "var(--tx-faint)" }}>
+                        {f.diasAtraso > 0 ? `${f.diasAtraso}d` : "—"}
+                      </td>
+                      <td className="tabular" style={{ padding: "6px 10px", textAlign: "right", color: "var(--tx)", fontWeight: 600 }}>{fmtM(f.monto)}</td>
+                      <td style={{ padding: "6px 10px", textAlign: "right" }}>
+                        {f.critica ? <StatusBadge level="violet" size="sm">Crítica</StatusBadge>
+                         : f.diasAtraso > 60 ? <StatusBadge level="red" size="sm">Vencida</StatusBadge>
+                         : f.diasAtraso > 0 ? <StatusBadge level="amber" size="sm">Atrasada</StatusBadge>
+                         : <StatusBadge level="green" size="sm">Al día</StatusBadge>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {cliente.facturasPendientes.length > 20 && (
+                <div style={{ padding: "6px 10px", fontSize: 10.5, color: "var(--tx-muted)", textAlign: "center", borderTop: "1px solid var(--border)" }}>
+                  Mostrando 20 de {cliente.facturasPendientes.length}
                 </div>
               )}
             </div>
-          )}
-
-          {/* Ficha técnica */}
-          <div style={{ paddingTop: 16, borderTop: '1px solid var(--border)' }}>
-            <div style={{ fontFamily: 'Fraunces, serif', fontSize: 15, fontWeight: 600, color: 'var(--fg)', marginBottom: 10 }}>
-              Ficha técnica
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 20px', fontSize: 12 }}>
-              <FichaRow label="Primera factura" value={fmtDate(cliente.primeraFactura)} />
-              <FichaRow label="Última factura" value={fmtDate(cliente.ultimaFactura)} />
-              <FichaRow label="Días sin facturar" value={cliente.diasDesdeUltimaVenta != null ? `${cliente.diasDesdeUltimaVenta} días` : '—'} />
-              <FichaRow label="Meses activos 12m" value={`${cliente.mesesConFacturacion12m} / 12`} />
-              <FichaRow label="Facturación 3m" value={fmtM(cliente.facturacionUlt3m)} />
-              <FichaRow label="Facturación 3m anterior" value={fmtM(cliente.facturacion3mAnterior)} />
-              <FichaRow
-                label="Δ vs trimestre anterior"
-                value={cliente.deltaPctVs3mAnterior == null ? '—' : fmtPct(cliente.deltaPctVs3mAnterior, 0)}
-                color={cliente.deltaPctVs3mAnterior == null ? null : (cliente.deltaPctVs3mAnterior >= 0 ? '#059669' : '#dc2626')}
-              />
-              <FichaRow label="Vencimiento prom. (cobrables)" value={cliente.diasVencidoPromedio > 0 ? `+${Math.round(cliente.diasVencidoPromedio)}d` : 'al día'} />
-            </div>
           </div>
-        </div>
+        )}
       </div>
-
-      <style>{`
-        @keyframes c360-fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes c360-slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
-      `}</style>
-    </>
-  );
-}
-
-function MiniKpi({ icon, label, value, sub, subColor }) {
-  return (
-    <div style={{
-      padding: '12px 14px', background: 'var(--bg)',
-      border: '1px solid var(--border)', borderRadius: 10,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--fg-dim, var(--fg))', fontSize: 11, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-        {icon}
-        <span>{label}</span>
-      </div>
-      <div style={{ fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums', fontSize: 18, fontWeight: 600, color: 'var(--fg)' }}>
-        {value}
-      </div>
-      {sub && (
-        <div style={{ fontSize: 11, color: subColor || 'var(--fg-dim, var(--fg))', marginTop: 2 }}>{sub}</div>
-      )}
     </div>
   );
 }
 
-function FichaRow({ label, value, color }) {
+function MiniStat({ label, value, sub, color }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-      <span style={{ color: 'var(--fg-dim, var(--fg))' }}>{label}</span>
-      <span style={{
-        fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums',
-        color: color || 'var(--fg)', fontWeight: 500,
-      }}>{value}</span>
+    <div style={{ background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 12px" }}>
+      <div style={{ fontSize: 9.5, color: "var(--tx-muted)", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600, marginBottom: 4 }}>{label}</div>
+      <div className="serif tabular" style={{ fontSize: 15, fontWeight: 700, color: color || "var(--tx)", letterSpacing: -0.3, lineHeight: 1.1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 9.5, color: "var(--tx-muted)", marginTop: 3 }}>{sub}</div>}
     </div>
   );
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// Tab principal
-// ──────────────────────────────────────────────────────────────────────
+function dsoColor(dso) {
+  if (dso == null) return "var(--tx-faint)";
+  if (dso <= 45) return "var(--green)";
+  if (dso <= 60) return "var(--amber)";
+  return "var(--red)";
+}
 
-const ESTADOS_ORDEN = ['rentable', 'grande_lento', 'en_fuga', 'cartera_especial', 'cliente_nuevo', 'activo'];
-
-export default function Clientes360({ cobranzas, rawRows, viajes, hoy }) {
-  const [seleccion, setSeleccion] = useState(null);
-  const [sortKey, setSortKey] = useState('facturacionUlt3m');
-  const [sortDir, setSortDir] = useState('desc');
-  const [search, setSearch] = useState('');
-  const [estadosActivos, setEstadosActivos] = useState(new Set(ESTADOS_ORDEN));
-
-  const maestro = useMemo(
-    () => buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }),
-    [rawRows, cobranzas, viajes, hoy]
-  );
-
-  const clientesFiltrados = useMemo(() => {
-    let arr = maestro.clientes;
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      arr = arr.filter(c => c.nombre.toLowerCase().includes(q) || (c.idFicha || '').toLowerCase().includes(q));
-    }
-    arr = arr.filter(c => estadosActivos.has(c.estado));
-    // Ordenar
-    const dir = sortDir === 'asc' ? 1 : -1;
-    arr = [...arr].sort((a, b) => {
-      const va = a[sortKey] ?? -Infinity;
-      const vb = b[sortKey] ?? -Infinity;
-      if (typeof va === 'string') return va.localeCompare(vb) * dir;
-      return (va - vb) * dir;
-    });
-    return arr;
-  }, [maestro.clientes, search, estadosActivos, sortKey, sortDir]);
-
-  const toggleEstado = (e) => {
-    const next = new Set(estadosActivos);
-    if (next.has(e)) next.delete(e); else next.add(e);
-    setEstadosActivos(next);
-  };
-
-  const toggleSort = (key) => {
-    if (sortKey === key) {
-      setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortKey(key);
-      setSortDir('desc');
-    }
-  };
-
-  const headers = [
-    { key: 'nombre', label: 'Cliente', align: 'left', sortable: true, w: 'minmax(220px, 1fr)' },
-    { key: 'estado', label: 'Estado', align: 'left', sortable: true, w: '150px' },
-    { key: 'facturacionUlt3m', label: 'Facturación 3m', align: 'right', sortable: true, w: '120px' },
-    { key: 'participacion', label: '% cartera', align: 'right', sortable: true, w: '80px' },
-    { key: '_trend', label: 'Tendencia 12m', align: 'center', sortable: false, w: '140px' },
-    { key: 'viajesMes', label: 'Viajes mes', align: 'right', sortable: true, w: '90px' },
-    { key: 'saldoTotal', label: 'Saldo', align: 'right', sortable: true, w: '110px' },
-    { key: 'dsoProm', label: 'DSO', align: 'right', sortable: true, w: '80px' },
-  ];
-
-  const gridTemplate = headers.map(h => h.w).join(' ');
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* Resumen */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
-        <KpiCard label="Clientes activos (3m)" value={String(maestro.totales.nClientesActivos3m)} />
-        <KpiCard label="Facturación 3m" value={fmtM(maestro.totales.facturacion3m)} />
-        <KpiCard label="Saldo cobrable" value={fmtM(maestro.totales.saldoCobrable)} />
-        <KpiCard
-          label="Saldo crítico (+180d)"
-          value={fmtM(maestro.totales.saldoCritico)}
-        />
-      </div>
-
-      {/* Chips distribución */}
-      <SectionCard>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            {ESTADOS_ORDEN.map(e => {
-              const count = maestro.distribucionEstado[e] || 0;
-              const meta = ESTADO_META[e];
-              const activo = estadosActivos.has(e);
-              return (
-                <button
-                  key={e}
-                  onClick={() => toggleEstado(e)}
-                  title={meta.desc}
-                  style={{
-                    padding: '6px 12px',
-                    borderRadius: 999,
-                    border: `1px solid ${activo ? meta.color : 'var(--border)'}`,
-                    background: activo ? meta.bg : 'transparent',
-                    color: activo ? meta.color : 'var(--fg-dim, var(--fg))',
-                    cursor: 'pointer',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    opacity: activo ? 1 : 0.55,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    transition: 'all 150ms',
-                  }}
-                >
-                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: activo ? meta.color : 'var(--fg-dim, var(--fg))' }} />
-                  {meta.label}
-                  <span style={{
-                    padding: '0 6px', borderRadius: 10, fontSize: 10,
-                    background: activo ? meta.color : 'var(--border)',
-                    color: activo ? 'white' : 'var(--fg-dim, var(--fg))',
-                  }}>{count}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 8,
-            padding: '8px 12px',
-            border: '1px solid var(--border)', borderRadius: 8,
-            background: 'var(--bg)',
-          }}>
-            <Search size={14} style={{ color: 'var(--fg-dim, var(--fg))' }} />
-            <input
-              type="text"
-              placeholder="Buscar cliente o RUT…"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              style={{
-                flex: 1, border: 'none', outline: 'none',
-                background: 'transparent', color: 'var(--fg)', fontSize: 13,
-                fontFamily: 'Inter, sans-serif',
-              }}
-            />
-            <span style={{ fontSize: 11, color: 'var(--fg-dim, var(--fg))', fontFamily: 'JetBrains Mono, monospace' }}>
-              {clientesFiltrados.length} / {maestro.clientes.length}
-            </span>
-          </div>
-        </div>
-      </SectionCard>
-
-      {/* Tabla maestra */}
-      <SectionCard title="Cartera de clientes" subtitle="Click en una fila para ver detalle completo. Ordenado por facturación últimos 3 meses.">
-        <div style={{ overflowX: 'auto', margin: '0 -4px' }}>
-          <div style={{ minWidth: 900 }}>
-            {/* header */}
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: gridTemplate,
-              gap: 12,
-              padding: '10px 14px',
-              fontSize: 10,
-              textTransform: 'uppercase',
-              letterSpacing: 0.6,
-              color: 'var(--fg-dim, var(--fg))',
-              borderBottom: '1px solid var(--border)',
-              fontWeight: 600,
-            }}>
-              {headers.map(h => (
-                <div
-                  key={h.key}
-                  onClick={h.sortable ? () => toggleSort(h.key) : undefined}
-                  style={{
-                    textAlign: h.align,
-                    cursor: h.sortable ? 'pointer' : 'default',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: h.align === 'right' ? 'flex-end' : (h.align === 'center' ? 'center' : 'flex-start'),
-                    gap: 4,
-                    userSelect: 'none',
-                  }}
-                >
-                  {h.label}
-                  {h.sortable && (
-                    <ArrowUpDown
-                      size={11}
-                      style={{
-                        opacity: sortKey === h.key ? 1 : 0.25,
-                        transform: sortKey === h.key && sortDir === 'asc' ? 'rotate(180deg)' : 'none',
-                        transition: 'transform 150ms',
-                      }}
-                    />
-                  )}
-                </div>
-              ))}
-            </div>
-
-            {/* rows */}
-            {clientesFiltrados.map((c, i) => {
-              const montos12 = c.facturacionMensual.map(x => x.monto);
-              const deltaUp = c.deltaPctVs3mAnterior != null && c.deltaPctVs3mAnterior >= 0;
-              return (
-                <div
-                  key={c.nombre}
-                  onClick={() => setSeleccion(c)}
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: gridTemplate,
-                    gap: 12,
-                    padding: '12px 14px',
-                    borderBottom: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    fontSize: 13,
-                    transition: 'background 120ms',
-                    alignItems: 'center',
-                  }}
-                  onMouseEnter={e => e.currentTarget.style.background = 'var(--bg)'}
-                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                >
-                  {/* Cliente */}
-                  <div style={{ overflow: 'hidden' }}>
-                    <div style={{ fontWeight: 600, color: 'var(--fg)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {c.nombre}
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--fg-dim, var(--fg))', fontFamily: 'JetBrains Mono, monospace' }}>
-                      {c.idFicha || '—'}
-                    </div>
-                  </div>
-
-                  {/* Estado */}
-                  <div><EstadoBadge estado={c.estado} compact /></div>
-
-                  {/* Facturación 3m */}
-                  <div style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums' }}>
-                    {fmtM(c.facturacionUlt3m)}
-                    {c.deltaPctVs3mAnterior != null && (
-                      <div style={{
-                        fontSize: 10, color: deltaUp ? '#059669' : '#dc2626',
-                        display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 2,
-                      }}>
-                        {deltaUp ? <TrendingUp size={9} /> : <TrendingDown size={9} />}
-                        {fmtPct(Math.abs(c.deltaPctVs3mAnterior), 0)}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Participación */}
-                  <div style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums', color: c.esGrande ? 'var(--accent)' : 'var(--fg-dim, var(--fg))', fontWeight: c.esGrande ? 600 : 400 }}>
-                    {fmtPct(c.participacion * 100, 1)}
-                  </div>
-
-                  {/* Sparkline */}
-                  <div style={{ display: 'flex', justifyContent: 'center' }}>
-                    <Sparkline data={montos12} />
-                  </div>
-
-                  {/* Viajes mes */}
-                  <div style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums', color: 'var(--fg-dim, var(--fg))' }}>
-                    {c.viajesMes != null ? fmtInt(c.viajesMes) : '—'}
-                  </div>
-
-                  {/* Saldo */}
-                  <div style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums' }}>
-                    {fmtM(c.saldoTotal)}
-                    {c.saldoCritico > 0 && (
-                      <div style={{ fontSize: 10, color: '#7c3aed' }}>
-                        {fmtM(c.saldoCritico)} crít.
-                      </div>
-                    )}
-                  </div>
-
-                  {/* DSO */}
-                  <div style={{ textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontVariantNumeric: 'tabular-nums' }}>
-                    {c.dsoProm != null ? (
-                      <span style={{ color: c.dsoProm > 60 ? '#dc2626' : (c.dsoProm > 45 ? '#d97706' : '#059669') }}>
-                        {Math.round(c.dsoProm)}d
-                      </span>
-                    ) : c.dsoEfectivo != null ? (
-                      <span style={{ color: 'var(--fg-dim, var(--fg))', fontSize: 11 }}>~{Math.round(c.dsoEfectivo)}d</span>
-                    ) : '—'}
-                  </div>
-                </div>
-              );
-            })}
-
-            {clientesFiltrados.length === 0 && (
-              <div style={{ padding: 40, textAlign: 'center', color: 'var(--fg-dim, var(--fg))', fontSize: 13 }}>
-                Ningún cliente coincide con los filtros.
-              </div>
-            )}
-          </div>
-        </div>
-      </SectionCard>
-
-      {/* Drawer */}
-      {seleccion && (
-        <ClienteDrawer
-          cliente={seleccion}
-          onClose={() => setSeleccion(null)}
-          meses12m={maestro.meses12m}
-        />
-      )}
-    </div>
-  );
+function deltaColor(d) {
+  if (d == null) return "var(--tx-faint)";
+  if (d >= 10) return "var(--green)";
+  if (d >= -10) return "var(--tx-muted)";
+  if (d >= -40) return "var(--amber)";
+  return "var(--red)";
 }

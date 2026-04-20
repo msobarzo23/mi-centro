@@ -1,267 +1,244 @@
 import { useState, useMemo } from "react";
 import {
-  Receipt, AlertTriangle, Clock, TrendingDown, Search,
-  ChevronDown, ChevronRight, Building2, FileText, Calendar,
-  CheckCircle2, XCircle, Download,
+  Receipt, AlertTriangle, Clock, Globe, Building2, Search, ChevronRight,
+  TrendingDown, TrendingUp, CheckCircle2, XCircle, Filter, X,
 } from "lucide-react";
 import { SectionCard, KpiCard, StatusBadge, EmptyState } from "../components/common.jsx";
 import { FileUploader } from "../components/FileUploader.jsx";
-import { fmtM, fmtFull, fmtDateMed, fmtNum, fmtPct, fmtPctNoSign } from "../utils/format.js";
+import { fmtM, fmtFull, fmtDateMed, fmtNum, normName, todayMidnight } from "../utils/format.js";
 
-export function Cobranzas({ cobranzas, cobranzasRaw, uploadCobranzas, clearCobranzas, sheets }) {
-  const [query, setQuery] = useState("");
-  const [selectedCliente, setSelectedCliente] = useState(null);
-  const [sortBy, setSortBy] = useState("monto"); // monto | dso | cantidad | vencidas
+export function Cobranzas({
+  cobranzas, C,
+  saldosRaw, uploadSaldos, clearSaldos,
+  historicoRaw, uploadHistorico, clearHistorico,
+}) {
+  const [selectedClient, setSelectedClient] = useState(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("todos"); // todos | nacionales | internacionales | criticos
+  const [bucketFocus, setBucketFocus] = useState(null); // null | "porVencer" | "vencidas_0_30" | ...
 
-  // Sin archivo cargado: mostrar uploader grande
-  if (!cobranzas) {
+  // Si no hay saldos cargados: pantalla de onboarding
+  if (!cobranzas || !saldosRaw) {
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 640 }}>
         <div>
           <h1 className="serif" style={{ fontSize: 28, fontWeight: 700, color: "var(--tx)", letterSpacing: -1, marginBottom: 4 }}>
-            Cuentas por cobrar
+            Por cobrar
           </h1>
           <p style={{ fontSize: 13, color: "var(--tx-muted)" }}>
-            Aging de la cuenta 1110401001 — Clientes Nacionales
+            Sube el Informe por Análisis de Defontana para ver el aging, DSO y detalle por cliente.
           </p>
         </div>
-        <SectionCard title="Sube el informe de Defontana" icon={Receipt} color="var(--accent)">
-          <FileUploader onUpload={uploadCobranzas} onClear={clearCobranzas} current={cobranzasRaw} />
-          <div style={{ marginTop: 16, padding: "12px 14px", background: "var(--bg-surface-2)", borderRadius: 10, fontSize: 11.5, color: "var(--tx-muted)", lineHeight: 1.6 }}>
-            <strong style={{ color: "var(--tx)" }}>Cómo exportarlo:</strong> en Defontana → Informe por Análisis → Cuenta <strong style={{ color: "var(--tx)" }}>1110401001 Clientes Nacionales</strong> → descarga .xlsx. El app procesa todo localmente en tu navegador; nada sale de este equipo.
-          </div>
-        </SectionCard>
+        <FileUploader
+          onUpload={uploadSaldos}
+          onClear={clearSaldos}
+          current={saldosRaw}
+          title="Sube los saldos actuales"
+          description="Informe por Análisis de Defontana. Puedes soltar el archivo de cuenta 1110401001 (Nacionales), 1110401002 (Internacionales), o ambos juntos."
+        />
       </div>
     );
   }
 
-  // Cliente seleccionado para drill-down
-  if (selectedCliente) {
-    const c = cobranzas.porCliente[selectedCliente];
-    if (!c) { setSelectedCliente(null); return null; }
-    return (
-      <DetalleCliente
-        cliente={c}
-        onBack={() => setSelectedCliente(null)}
-        cobranzas={cobranzas}
-      />
-    );
-  }
+  const clientes = cobranzas.clientesArray || [];
+  const hoy = todayMidnight();
 
-  // Filtrar por búsqueda
-  const clientes = useMemo(() => {
-    let arr = cobranzas.clientesArray.filter(c => c.saldoPendiente > 0);
-    if (query.trim()) {
-      const q = query.toLowerCase().trim();
-      arr = arr.filter(c => c.nombre.toLowerCase().includes(q) || (c.rut || "").includes(q));
-    }
-    switch (sortBy) {
-      case "dso":
-        arr = [...arr].sort((a, b) => (b.dsoReal || 0) - (a.dsoReal || 0));
-        break;
-      case "cantidad":
-        arr = [...arr].sort((a, b) => b.facturasPendientes.length - a.facturasPendientes.length);
-        break;
-      case "vencidas":
-        arr = [...arr].sort((a, b) => {
-          const av = a.facturasPendientes.filter(f => f.diasAtraso > 0).reduce((s, f) => s + f.monto, 0);
-          const bv = b.facturasPendientes.filter(f => f.diasAtraso > 0).reduce((s, f) => s + f.monto, 0);
-          return bv - av;
-        });
-        break;
-      default:
-        arr = [...arr].sort((a, b) => b.saldoPendiente - a.saldoPendiente);
-    }
-    return arr;
-  }, [cobranzas, query, sortBy]);
+  // Filtros
+  const clientesFiltrados = clientes.filter(c => {
+    if (search && !c.nombre.toLowerCase().includes(search.toLowerCase())) return false;
+    if (filter === "nacionales" && c.esInternacional) return false;
+    if (filter === "internacionales" && !c.esInternacional) return false;
+    if (filter === "criticos" && c.montoCriticas <= 0) return false;
+    return true;
+  });
 
-  const aging = cobranzas.aging;
-  const totalVencido = cobranzas.totalVencido;
-  const totalVencidoCount = aging.vencidas_0_30.count + aging.vencidas_31_60.count + aging.vencidas_61_90.count + aging.vencidas_91_180.count + aging.vencidas_critica.count;
+  // Aging buckets con labels
+  const BUCKETS = [
+    { key: "porVencer", label: "Por vencer", color: "var(--green)", bg: "var(--green-bg)" },
+    { key: "vencidas_0_30", label: "1 a 30 días", color: "var(--amber)", bg: "var(--amber-bg)" },
+    { key: "vencidas_31_60", label: "31 a 60 días", color: "var(--amber)", bg: "var(--amber-bg)" },
+    { key: "vencidas_61_90", label: "61 a 90 días", color: "var(--red)", bg: "var(--red-bg)" },
+    { key: "vencidas_91_180", label: "91 a 180 días", color: "var(--red)", bg: "var(--red-bg)" },
+    { key: "vencidas_critica", label: "+180 días (crítica)", color: "var(--violet)", bg: "var(--violet-bg)" },
+  ];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* Hero */}
+      {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 20, flexWrap: "wrap" }}>
         <div>
           <h1 className="serif" style={{ fontSize: 28, fontWeight: 700, color: "var(--tx)", letterSpacing: -1, marginBottom: 4 }}>
-            Cuentas por cobrar
+            Por cobrar
           </h1>
           <p style={{ fontSize: 13, color: "var(--tx-muted)" }}>
-            {cobranzas.clientesArray.length} clientes · informe al {fmtDateMed(cobranzas.fechaInforme)}
+            {clientes.length} clientes con saldo · DSO global {cobranzas.dsoGlobal ? Math.round(cobranzas.dsoGlobal) + " días" : "sin muestra"} · {cobranzas.totalFacturasPendientes} facturas pendientes · al {fmtDateMed(cobranzas.fechaInforme)}
           </p>
         </div>
-        <FileUploader compact current={cobranzasRaw} onUpload={uploadCobranzas} />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <FileUploader compact current={saldosRaw} onUpload={uploadSaldos} />
+        </div>
       </div>
 
-      {/* KPIs principales */}
+      {/* KPIs */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <KpiCard
           icon={Receipt}
-          label="Total por cobrar"
+          label="Total pendiente"
           value={fmtM(cobranzas.totalPendiente)}
-          sub={`${cobranzas.totalFacturasPendientes} facturas · ${cobranzas.clientesArray.filter(c => c.saldoPendiente > 0).length} clientes`}
+          sub={`${fmtNum(clientes.length)} clientes · ${fmtNum(cobranzas.totalFacturasPendientes)} facturas`}
           color="var(--accent)"
           colorBg="var(--accent-bg)"
           highlight
         />
         <KpiCard
           icon={CheckCircle2}
-          label="Cobrable real"
+          label="Cobrable"
           value={fmtM(cobranzas.totalCobrable)}
-          sub={`Excluye ${fmtM(cobranzas.totalCritico)} con +180 días (cobranza especial)`}
+          sub={`${((cobranzas.totalCobrable / cobranzas.totalPendiente) * 100).toFixed(0)}% del total`}
           color="var(--green)"
           colorBg="var(--green-bg)"
-          highlight
         />
         <KpiCard
           icon={AlertTriangle}
-          label="Total vencido"
-          value={fmtM(totalVencido)}
-          sub={`${totalVencidoCount} facturas · ${cobranzas.totalPendiente > 0 ? fmtPctNoSign(totalVencido / cobranzas.totalPendiente * 100) : "0%"} del total`}
-          color={totalVencido > cobranzas.totalPendiente * 0.2 ? "var(--red)" : "var(--amber)"}
-          colorBg={totalVencido > cobranzas.totalPendiente * 0.2 ? "var(--red-bg)" : "var(--amber-bg)"}
+          label="Vencido"
+          value={fmtM(cobranzas.totalVencido)}
+          sub={`${((cobranzas.totalVencido / cobranzas.totalPendiente) * 100).toFixed(0)}% del total`}
+          color="var(--amber)"
+          colorBg="var(--amber-bg)"
         />
         <KpiCard
-          icon={Clock}
-          label="DSO promedio"
-          value={cobranzas.dsoGlobal ? Math.round(cobranzas.dsoGlobal) + " días" : "—"}
-          sub={cobranzas.dsoGlobal ? (cobranzas.dsoGlobal <= 35 ? "Dentro de rango" : cobranzas.dsoGlobal <= 50 ? "Elevado" : "Crítico") : "Sin historial"}
-          color={!cobranzas.dsoGlobal ? "var(--tx-muted)" : cobranzas.dsoGlobal <= 35 ? "var(--green)" : cobranzas.dsoGlobal <= 50 ? "var(--amber)" : "var(--red)"}
-          colorBg={!cobranzas.dsoGlobal ? "var(--bg-surface-3)" : cobranzas.dsoGlobal <= 35 ? "var(--green-bg)" : cobranzas.dsoGlobal <= 50 ? "var(--amber-bg)" : "var(--red-bg)"}
+          icon={XCircle}
+          label="Crítico (+180d)"
+          value={fmtM(cobranzas.totalCritico)}
+          sub={`${cobranzas.aging.vencidas_critica.count} facturas · Cobranza especial`}
+          color="var(--violet)"
+          colorBg="var(--violet-bg)"
         />
+        {cobranzas.totalPorCuenta?.internacional > 0 && (
+          <KpiCard
+            icon={Globe}
+            label="Internacional"
+            value={fmtM(cobranzas.totalPorCuenta.internacional)}
+            sub={`${((cobranzas.totalPorCuenta.internacional / cobranzas.totalPendiente) * 100).toFixed(0)}% del total`}
+            color="var(--blue)"
+            colorBg="var(--blue-bg)"
+          />
+        )}
       </div>
 
-      {/* Aging buckets */}
+      {/* Aging tablero */}
       <SectionCard
-        title="Aging de cartera"
-        subtitle="Distribución de facturas por días desde vencimiento"
-        icon={Calendar}
+        title="Aging"
+        subtitle="Click en un bucket para filtrar las facturas abajo"
+        icon={Clock}
         color="var(--accent)"
       >
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
-          <AgingBucket
-            label="Por vencer"
-            count={aging.porVencer.count}
-            monto={aging.porVencer.monto}
-            total={cobranzas.totalPendiente}
-            color="var(--green)"
-            description="Aún no vencidas"
-          />
-          <AgingBucket
-            label="1 — 30 días"
-            count={aging.vencidas_0_30.count}
-            monto={aging.vencidas_0_30.monto}
-            total={cobranzas.totalPendiente}
-            color="var(--amber)"
-            description="Recién vencidas"
-          />
-          <AgingBucket
-            label="31 — 60 días"
-            count={aging.vencidas_31_60.count}
-            monto={aging.vencidas_31_60.monto}
-            total={cobranzas.totalPendiente}
-            color="var(--accent)"
-            description="Seguimiento"
-          />
-          <AgingBucket
-            label="61 — 90 días"
-            count={aging.vencidas_61_90.count}
-            monto={aging.vencidas_61_90.monto}
-            total={cobranzas.totalPendiente}
-            color="var(--red)"
-            description="Gestión urgente"
-          />
-          <AgingBucket
-            label="91 — 180 días"
-            count={aging.vencidas_91_180.count}
-            monto={aging.vencidas_91_180.monto}
-            total={cobranzas.totalPendiente}
-            color="var(--red)"
-            description="Riesgo alto"
-            critical
-          />
-          <AgingBucket
-            label="+180 días"
-            count={aging.vencidas_critica.count}
-            monto={aging.vencidas_critica.monto}
-            total={cobranzas.totalPendiente}
-            color="var(--violet)"
-            description="Cobranza especial"
-            critical
-          />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
+          {BUCKETS.map(b => {
+            const data = cobranzas.aging[b.key];
+            const pct = cobranzas.totalPendiente > 0 ? (data.monto / cobranzas.totalPendiente) * 100 : 0;
+            const active = bucketFocus === b.key;
+            return (
+              <button
+                key={b.key}
+                onClick={() => setBucketFocus(active ? null : b.key)}
+                style={{
+                  background: active ? b.bg : "var(--bg-surface)",
+                  border: `1px solid ${active ? b.color : "var(--border)"}`,
+                  borderRadius: 10,
+                  padding: "12px 14px",
+                  textAlign: "left",
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                  transition: "all 0.15s",
+                  position: "relative",
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: b.color, opacity: active ? 1 : 0.5 }} />
+                <div style={{ fontSize: 10.5, color: "var(--tx-muted)", fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase", marginBottom: 6 }}>
+                  {b.label}
+                </div>
+                <div className="serif tabular" style={{ fontSize: 18, fontWeight: 700, color: data.monto > 0 ? b.color : "var(--tx-faint)", letterSpacing: -0.5 }}>
+                  {fmtM(data.monto)}
+                </div>
+                <div style={{ fontSize: 10.5, color: "var(--tx-muted)", marginTop: 3 }}>
+                  {data.count} fact · {pct.toFixed(0)}%
+                </div>
+              </button>
+            );
+          })}
         </div>
-        {aging.vencidas_critica.monto > 0 && (
-          <div style={{
-            marginTop: 14, padding: "12px 14px",
-            background: "var(--violet-bg)",
-            border: "1px solid var(--violet)",
-            borderRadius: 10,
-            fontSize: 11.5, color: "var(--tx)", lineHeight: 1.5,
-          }}>
-            <strong>Nota sobre +180 días:</strong> {fmtM(aging.vencidas_critica.monto)} en {aging.vencidas_critica.count} facturas con más de 6 meses de atraso. Estas facturas <strong>no se incluyen</strong> en la proyección de cobranza esperada del Cockpit — por su antigüedad requieren gestión especial y no son ingresos automáticos. Revísalas manualmente para decidir provisión, cobranza judicial o castigo.
+        {bucketFocus && (
+          <div style={{ marginTop: 14 }}>
+            <BucketDetail bucket={cobranzas.aging[bucketFocus]} label={BUCKETS.find(b => b.key === bucketFocus).label} onClose={() => setBucketFocus(null)} />
           </div>
         )}
       </SectionCard>
 
-      {/* Filtros y tabla de clientes */}
-      <SectionCard
-        title={`Clientes con saldo pendiente — ${clientes.length}`}
-        subtitle="Click en cualquier fila para ver las facturas del cliente"
-        icon={Building2}
-        color="var(--accent)"
-        action={
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <div style={{ position: "relative" }}>
-              <Search size={12} color="var(--tx-muted)" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }} />
-              <input
-                type="text"
-                placeholder="Buscar cliente o RUT"
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-                style={{
-                  padding: "6px 12px 6px 28px",
-                  background: "var(--bg-surface-2)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 8,
-                  color: "var(--tx)",
-                  fontSize: 11.5,
-                  outline: "none",
-                  fontFamily: "inherit",
-                  width: 180,
-                }}
-              />
-            </div>
-            <select
-              value={sortBy}
-              onChange={e => setSortBy(e.target.value)}
+      {/* Filtros de tabla */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", flex: "1 1 280px", maxWidth: 420 }}>
+          <Search size={12} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--tx-muted)" }} />
+          <input
+            type="text"
+            placeholder="Buscar cliente..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            style={{
+              width: "100%",
+              padding: "8px 12px 8px 30px",
+              fontSize: 12.5,
+              background: "var(--bg-surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              color: "var(--tx)",
+              fontFamily: "inherit",
+              outline: "none",
+            }}
+          />
+        </div>
+        <div style={{ display: "flex", gap: 4, padding: 3, background: "var(--bg-surface-2)", borderRadius: 8, border: "1px solid var(--border)" }}>
+          {[
+            { id: "todos", label: "Todos" },
+            { id: "nacionales", label: "Nacionales" },
+            { id: "internacionales", label: "Internacionales" },
+            { id: "criticos", label: "Con crítica" },
+          ].map(f => (
+            <button
+              key={f.id}
+              onClick={() => setFilter(f.id)}
               style={{
-                padding: "6px 10px",
-                background: "var(--bg-surface-2)",
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                color: "var(--tx)",
-                fontSize: 11.5,
-                outline: "none",
+                padding: "5px 11px",
+                background: filter === f.id ? "var(--bg-surface)" : "transparent",
+                border: "1px solid " + (filter === f.id ? "var(--border-strong)" : "transparent"),
+                borderRadius: 6,
+                fontSize: 11,
+                color: filter === f.id ? "var(--tx)" : "var(--tx-muted)",
+                cursor: "pointer",
                 fontFamily: "inherit",
+                fontWeight: filter === f.id ? 600 : 500,
               }}
             >
-              <option value="monto">Por monto</option>
-              <option value="dso">Por DSO</option>
-              <option value="vencidas">Por vencidas</option>
-              <option value="cantidad">Por # facturas</option>
-            </select>
-          </div>
-        }
-      >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: "var(--tx-muted)", marginLeft: "auto" }}>
+          Mostrando {clientesFiltrados.length} de {clientes.length}
+        </div>
+      </div>
+
+      {/* Tabla de clientes */}
+      <SectionCard title="Clientes con saldo" icon={Receipt} color="var(--accent)">
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>
               <tr>
-                {["Cliente", "RUT", "Facturas", "Pendiente", "DSO real", "Vencido", "Vence en 30d", "Acción"].map((h, i) => (
+                {["Cliente", "", "Saldo total", "Cobrable", "Crítico", "DSO", "# fact", ""].map((h, i) => (
                   <th key={i} style={{
                     padding: "10px 10px",
-                    textAlign: i === 0 || i === 1 ? "left" : "right",
+                    textAlign: i <= 1 ? "left" : "right",
                     color: "var(--tx-muted)",
                     fontWeight: 600,
                     fontSize: 10.5,
@@ -274,251 +251,238 @@ export function Cobranzas({ cobranzas, cobranzasRaw, uploadCobranzas, clearCobra
               </tr>
             </thead>
             <tbody>
-              {clientes.map((c, i) => {
-                const vencidas = c.facturasPendientes.filter(f => f.diasAtraso > 0);
-                const vencidasMonto = vencidas.reduce((s, f) => s + f.monto, 0);
-                const prox30 = c.facturasPendientes.filter(f => f.vencimiento && f.diasAtraso != null && f.diasAtraso <= 0 && f.diasAtraso >= -30).reduce((s, f) => s + f.monto, 0);
-                const dsoColor = !c.dsoReal ? "var(--tx-muted)" : c.dsoReal <= 35 ? "var(--green)" : c.dsoReal <= 50 ? "var(--amber)" : "var(--red)";
-                const pctVsTotal = cobranzas.totalPendiente > 0 ? (c.saldoPendiente / cobranzas.totalPendiente * 100) : 0;
-                return (
-                  <tr
-                    key={i}
-                    onClick={() => setSelectedCliente(Object.keys(cobranzas.porCliente).find(k => cobranzas.porCliente[k].nombre === c.nombre))}
-                    style={{
-                      borderBottom: "1px solid var(--border)",
-                      cursor: "pointer",
-                      transition: "background 0.1s",
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.background = "var(--bg-surface-2)"}
-                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}
-                  >
-                    <td style={{ padding: "10px 10px", color: "var(--tx)", fontWeight: 500, maxWidth: 280 }}>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.nombre}</span>
-                        <span style={{ fontSize: 10, color: "var(--tx-faint)" }}>
-                          {pctVsTotal.toFixed(1)}% del total
-                        </span>
-                      </div>
-                    </td>
-                    <td className="mono" style={{ padding: "10px 10px", color: "var(--tx-muted)", fontSize: 11 }}>{c.rut}</td>
-                    <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: "var(--tx-muted)" }}>
-                      {c.facturasPendientes.length}
-                    </td>
-                    <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: "var(--tx)", fontWeight: 700 }}>
-                      {fmtM(c.saldoPendiente)}
-                    </td>
-                    <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: dsoColor, fontWeight: 600 }}>
-                      {c.dsoReal ? Math.round(c.dsoReal) + "d" : "—"}
-                      {c.dsoMuestras > 0 && <span style={{ color: "var(--tx-faint)", fontSize: 10, marginLeft: 4 }}>n={c.dsoMuestras}</span>}
-                    </td>
-                    <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: vencidasMonto > 0 ? "var(--red)" : "var(--tx-faint)", fontWeight: vencidasMonto > 0 ? 700 : 400 }}>
-                      {vencidasMonto > 0 ? fmtM(vencidasMonto) : "—"}
-                      {vencidas.length > 0 && <span style={{ color: "var(--tx-faint)", fontSize: 10, marginLeft: 4 }}>({vencidas.length})</span>}
-                    </td>
-                    <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: prox30 > 0 ? "var(--green)" : "var(--tx-faint)" }}>
-                      {prox30 > 0 ? fmtM(prox30) : "—"}
-                    </td>
-                    <td style={{ padding: "10px 10px", textAlign: "right" }}>
-                      <ChevronRight size={14} color="var(--tx-muted)" style={{ display: "inline-block" }} />
-                    </td>
-                  </tr>
-                );
-              })}
+              {clientesFiltrados.slice(0, 100).map((c, i) => (
+                <tr
+                  key={i}
+                  onClick={() => setSelectedClient(c)}
+                  style={{
+                    borderBottom: "1px solid var(--border)",
+                    cursor: "pointer",
+                    transition: "background 0.1s",
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = "var(--bg-surface-2)"}
+                  onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                >
+                  <td style={{ padding: "10px 10px", color: "var(--tx)", fontWeight: 500, maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {c.nombre}
+                  </td>
+                  <td style={{ padding: "10px 4px" }}>
+                    {c.esInternacional && (
+                      <span style={{
+                        display: "inline-flex", alignItems: "center", gap: 3,
+                        padding: "2px 7px",
+                        background: "var(--blue-bg)",
+                        color: "var(--blue)",
+                        borderRadius: 999,
+                        fontSize: 9.5,
+                        fontWeight: 700,
+                        letterSpacing: 0.3,
+                      }}>
+                        <Globe size={9} /> INT
+                      </span>
+                    )}
+                  </td>
+                  <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: "var(--tx)", fontWeight: 700 }}>
+                    {fmtM(c.saldoPendiente)}
+                  </td>
+                  <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: c.montoCobrables > 0 ? "var(--green)" : "var(--tx-faint)" }}>
+                    {c.montoCobrables > 0 ? fmtM(c.montoCobrables) : "—"}
+                  </td>
+                  <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: c.montoCriticas > 0 ? "var(--violet)" : "var(--tx-faint)", fontWeight: c.montoCriticas > 0 ? 600 : 400 }}>
+                    {c.montoCriticas > 0 ? fmtM(c.montoCriticas) : "—"}
+                  </td>
+                  <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: dsoColor(c.dsoReal) }}>
+                    {c.dsoReal != null ? `${Math.round(c.dsoReal)}d` : "—"}
+                    {c.dsoReal != null && <span style={{ color: "var(--tx-faint)", fontSize: 9.5, marginLeft: 3 }}>({c.dsoMuestras})</span>}
+                  </td>
+                  <td className="tabular" style={{ padding: "10px 10px", textAlign: "right", color: "var(--tx-muted)" }}>
+                    {c.facturasCount}
+                  </td>
+                  <td style={{ padding: "10px 10px", textAlign: "right", color: "var(--tx-muted)" }}>
+                    <ChevronRight size={13} />
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
+        {clientesFiltrados.length > 100 && (
+          <div style={{ fontSize: 11, color: "var(--tx-muted)", textAlign: "center", marginTop: 10 }}>
+            Mostrando los primeros 100 de {clientesFiltrados.length}. Filtra más arriba para ver otros.
+          </div>
+        )}
       </SectionCard>
+
+      {/* Drawer detalle cliente */}
+      {selectedClient && (
+        <ClienteDrawer cliente={selectedClient} hoy={hoy} onClose={() => setSelectedClient(null)} />
+      )}
     </div>
   );
 }
 
-function AgingBucket({ label, count, monto, total, color, description, critical }) {
-  const pct = total > 0 ? (monto / total * 100) : 0;
+// ══════════════════════════════════════════════════════════════════════
+
+function BucketDetail({ bucket, label, onClose }) {
+  const ordenadas = [...bucket.facturas].sort((a, b) => b.monto - a.monto).slice(0, 30);
   return (
-    <div style={{
-      background: critical && monto > 0 ? `${color}15` : "var(--bg-surface-2)",
-      border: `1px solid ${critical && monto > 0 ? color + "55" : "var(--border)"}`,
-      borderRadius: 12,
-      padding: "14px 16px",
-      position: "relative",
-      overflow: "hidden",
-    }}>
-      {critical && monto > 0 && (
-        <div style={{ position: "absolute", top: 8, right: 8 }}>
-          <AlertTriangle size={12} color={color} />
+    <div style={{ background: "var(--bg-surface-2)", border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+      <div style={{ padding: "10px 14px", background: "var(--bg-surface-3, var(--bg-surface))", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: "var(--tx)" }}>
+            {label}
+          </span>
+          <span style={{ fontSize: 11, color: "var(--tx-muted)", marginLeft: 10 }}>
+            Top 30 por monto · {bucket.count} facturas · {fmtM(bucket.monto)} total
+          </span>
         </div>
-      )}
-      <div style={{ fontSize: 10.5, color: "var(--tx-muted)", fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 8 }}>
-        {label}
-      </div>
-      <div className="serif tabular" style={{ fontSize: 22, fontWeight: 700, color, letterSpacing: -0.6, lineHeight: 1.1, marginBottom: 4 }}>
-        {fmtM(monto)}
-      </div>
-      <div style={{ fontSize: 10.5, color: "var(--tx-muted)", marginBottom: 8 }}>
-        {count} {count === 1 ? "factura" : "facturas"} · {pct.toFixed(1)}%
-      </div>
-      <div style={{ height: 3, background: "var(--bg-surface-3)", borderRadius: 2, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: pct + "%", background: color, borderRadius: 2 }} />
-      </div>
-      <div style={{ fontSize: 10, color: "var(--tx-faint)", marginTop: 6, fontStyle: "italic" }}>
-        {description}
-      </div>
-    </div>
-  );
-}
-
-function DetalleCliente({ cliente, onBack, cobranzas }) {
-  const vencidas = cliente.facturasPendientes.filter(f => f.diasAtraso > 0).sort((a, b) => b.diasAtraso - a.diasAtraso);
-  const porVencer = cliente.facturasPendientes.filter(f => !f.diasAtraso || f.diasAtraso <= 0).sort((a, b) => (a.vencimiento || 0) - (b.vencimiento || 0));
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* Header */}
-      <div>
-        <button
-          onClick={onBack}
-          style={{
-            background: "transparent",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            padding: "6px 12px",
-            color: "var(--tx-muted)",
-            fontSize: 11.5,
-            cursor: "pointer",
-            marginBottom: 16,
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            fontFamily: "inherit",
-          }}
-        >
-          ← Volver a todos los clientes
+        <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--tx-muted)", padding: 4, display: "flex" }}>
+          <X size={14} />
         </button>
-        <h1 className="serif" style={{ fontSize: 26, fontWeight: 700, color: "var(--tx)", letterSpacing: -0.8, marginBottom: 4 }}>
-          {cliente.nombre}
-        </h1>
-        <p className="mono" style={{ fontSize: 12, color: "var(--tx-muted)" }}>
-          {cliente.rut}
-        </p>
       </div>
-
-      {/* KPIs del cliente */}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <KpiCard
-          icon={Receipt}
-          label="Saldo pendiente"
-          value={fmtM(cliente.saldoPendiente)}
-          sub={`${cliente.facturasPendientes.length} facturas por cobrar`}
-          color="var(--accent)"
-          colorBg="var(--accent-bg)"
-          highlight
-        />
-        <KpiCard
-          icon={Clock}
-          label="DSO real"
-          value={cliente.dsoReal ? Math.round(cliente.dsoReal) + " días" : "—"}
-          sub={cliente.dsoMuestras > 0 ? `Basado en ${cliente.dsoMuestras} pagos históricos` : "Sin pagos registrados"}
-          color={!cliente.dsoReal ? "var(--tx-muted)" : cliente.dsoReal <= 35 ? "var(--green)" : cliente.dsoReal <= 50 ? "var(--amber)" : "var(--red)"}
-          colorBg={!cliente.dsoReal ? "var(--bg-surface-3)" : cliente.dsoReal <= 35 ? "var(--green-bg)" : cliente.dsoReal <= 50 ? "var(--amber-bg)" : "var(--red-bg)"}
-        />
-        <KpiCard
-          icon={TrendingDown}
-          label="Facturado histórico"
-          value={fmtM(cliente.totalCargo)}
-          sub={`Cobrado ${fmtM(cliente.totalAbono)} (${((cliente.totalAbono / Math.max(cliente.totalCargo, 1)) * 100).toFixed(0)}%)`}
-          color="var(--tx-muted)"
-          colorBg="var(--bg-surface-3)"
-        />
-        <KpiCard
-          icon={AlertTriangle}
-          label="Facturas vencidas"
-          value={vencidas.length.toString()}
-          sub={vencidas.length > 0 ? `${fmtM(vencidas.reduce((s, f) => s + f.monto, 0))} total` : "Ninguna atrasada"}
-          color={vencidas.length > 0 ? "var(--red)" : "var(--green)"}
-          colorBg={vencidas.length > 0 ? "var(--red-bg)" : "var(--green-bg)"}
-        />
+      <div style={{ overflowX: "auto", maxHeight: 320, overflowY: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+          <thead style={{ position: "sticky", top: 0, background: "var(--bg-surface-2)" }}>
+            <tr>
+              {["Cliente", "Folio", "Emisión", "Vencimiento", "Atraso", "Monto"].map((h, i) => (
+                <th key={i} style={{ padding: "7px 10px", textAlign: i < 1 ? "left" : i > 3 ? "right" : "left", color: "var(--tx-muted)", fontWeight: 600, fontSize: 10, borderBottom: "1px solid var(--border)" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {ordenadas.map((f, i) => (
+              <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
+                <td style={{ padding: "6px 10px", color: "var(--tx)", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.cliente}</td>
+                <td style={{ padding: "6px 10px", color: "var(--tx-muted)", fontFamily: "var(--mono)" }}>{f.folio || "—"}</td>
+                <td style={{ padding: "6px 10px", color: "var(--tx-muted)" }}>{f.fecha ? fmtDateMed(f.fecha) : "—"}</td>
+                <td style={{ padding: "6px 10px", color: "var(--tx-muted)" }}>{f.vencimiento ? fmtDateMed(f.vencimiento) : "—"}</td>
+                <td style={{ padding: "6px 10px", color: f.diasAtraso > 0 ? "var(--red)" : "var(--tx-faint)", textAlign: "right" }}>
+                  {f.diasAtraso != null && f.diasAtraso > 0 ? `${f.diasAtraso}d` : "—"}
+                </td>
+                <td className="tabular" style={{ padding: "6px 10px", textAlign: "right", color: "var(--tx)", fontWeight: 600 }}>{fmtM(f.monto)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-
-      {/* Facturas vencidas */}
-      {vencidas.length > 0 && (
-        <SectionCard
-          title={`Facturas vencidas — ${vencidas.length}`}
-          subtitle="Ordenadas por días de atraso (más urgente arriba)"
-          icon={AlertTriangle}
-          color="var(--red)"
-        >
-          <FacturasTable facturas={vencidas} showAtraso />
-        </SectionCard>
-      )}
-
-      {/* Facturas por vencer */}
-      {porVencer.length > 0 && (
-        <SectionCard
-          title={`Por vencer — ${porVencer.length}`}
-          subtitle="Ordenadas por fecha de vencimiento"
-          icon={Calendar}
-          color="var(--green)"
-        >
-          <FacturasTable facturas={porVencer} />
-        </SectionCard>
-      )}
     </div>
   );
 }
 
-function FacturasTable({ facturas, showAtraso }) {
+function ClienteDrawer({ cliente, hoy, onClose }) {
+  const facturas = [...(cliente.facturasPendientes || [])].sort((a, b) => {
+    // Críticas primero, luego por días de atraso desc
+    if (a.critica !== b.critica) return a.critica ? -1 : 1;
+    return (b.diasAtraso || 0) - (a.diasAtraso || 0);
+  });
   return (
-    <div style={{ overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-        <thead>
-          <tr>
-            {["Folio", "Documento", "Fecha emisión", "Vencimiento", showAtraso ? "Días atraso" : "En días", "Monto"].map((h, i) => (
-              <th key={i} style={{
-                padding: "10px 10px",
-                textAlign: i <= 1 ? "left" : "right",
-                color: "var(--tx-muted)",
-                fontWeight: 600,
-                fontSize: 10.5,
-                borderBottom: "1px solid var(--border)",
-                textTransform: "uppercase",
-                letterSpacing: 0.6,
-                whiteSpace: "nowrap",
-              }}>{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {facturas.map((f, i) => (
-            <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
-              <td className="mono" style={{ padding: "8px 10px", color: "var(--tx)" }}>{f.folio}</td>
-              <td style={{ padding: "8px 10px", color: "var(--tx-muted)", fontSize: 11, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {f.documento}
-              </td>
-              <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: "var(--tx-muted)" }}>
-                {fmtDateMed(f.fecha)}
-              </td>
-              <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: "var(--tx)", fontWeight: 500 }}>
-                {fmtDateMed(f.vencimiento)}
-              </td>
-              <td className="tabular" style={{
-                padding: "8px 10px",
-                textAlign: "right",
-                color: showAtraso ? "var(--red)" : f.diasAtraso > -7 ? "var(--amber)" : "var(--green)",
-                fontWeight: 600,
-              }}>
-                {f.diasAtraso == null ? "—" :
-                  showAtraso ? `${f.diasAtraso}d` :
-                  f.diasAtraso > 0 ? `+${f.diasAtraso}d` :
-                  f.diasAtraso === 0 ? "hoy" :
-                  `en ${-f.diasAtraso}d`}
-              </td>
-              <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: "var(--tx)", fontWeight: 700 }}>
-                {fmtFull(f.monto)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.5)",
+        zIndex: 50,
+        display: "flex", justifyContent: "flex-end",
+        backdropFilter: "blur(3px)",
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: "min(720px, 100%)",
+          height: "100%",
+          background: "var(--bg)",
+          borderLeft: "1px solid var(--border)",
+          overflowY: "auto",
+          padding: "20px 24px",
+          animation: "slideIn 0.2s ease-out",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18, gap: 12 }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              {cliente.esInternacional ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", background: "var(--blue-bg)", color: "var(--blue)", borderRadius: 999, fontSize: 10, fontWeight: 700 }}>
+                  <Globe size={9} /> INTERNACIONAL
+                </span>
+              ) : (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", background: "var(--accent-bg)", color: "var(--accent)", borderRadius: 999, fontSize: 10, fontWeight: 700 }}>
+                  <Building2 size={9} /> NACIONAL
+                </span>
+              )}
+            </div>
+            <h2 className="serif" style={{ fontSize: 22, fontWeight: 700, color: "var(--tx)", letterSpacing: -0.6, marginBottom: 4 }}>
+              {cliente.nombre}
+            </h2>
+            {cliente.rut && <div style={{ fontSize: 11, color: "var(--tx-muted)", fontFamily: "var(--mono)" }}>{cliente.rut}</div>}
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 8, padding: 6, cursor: "pointer", color: "var(--tx-muted)", display: "flex" }}>
+            <X size={14} />
+          </button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, marginBottom: 20 }}>
+          <StatCard label="Saldo total" value={fmtM(cliente.saldoPendiente)} color="var(--accent)" />
+          <StatCard label="DSO real" value={cliente.dsoReal != null ? Math.round(cliente.dsoReal) + " días" : "sin muestra"} sub={cliente.dsoMuestras > 0 ? `${cliente.dsoMuestras} pagos observados` : "matcheo folio no disponible"} color={dsoColor(cliente.dsoReal)} />
+          <StatCard label="Cobrable" value={fmtM(cliente.montoCobrables)} sub={`${cliente.facturasCobrables?.length || 0} facturas ≤180d`} color="var(--green)" />
+          <StatCard label="Crítico" value={fmtM(cliente.montoCriticas)} sub={cliente.facturasCriticas?.length > 0 ? `${cliente.facturasCriticas.length} facturas +180d` : "sin facturas críticas"} color="var(--violet)" />
+        </div>
+
+        <div className="serif" style={{ fontSize: 14, fontWeight: 600, color: "var(--tx)", marginBottom: 10 }}>
+          Facturas pendientes ({facturas.length})
+        </div>
+        <div style={{ background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+              <thead>
+                <tr>
+                  {["Folio", "Emisión", "Vencimiento", "Atraso", "Monto", ""].map((h, i) => (
+                    <th key={i} style={{ padding: "8px 10px", textAlign: i === 0 || i === 1 || i === 2 ? "left" : "right", color: "var(--tx-muted)", fontSize: 10, fontWeight: 600, borderBottom: "1px solid var(--border)", textTransform: "uppercase", letterSpacing: 0.4 }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {facturas.map((f, i) => (
+                  <tr key={i} style={{ borderBottom: "1px solid var(--border)", background: f.critica ? "var(--violet-bg)" : "transparent" }}>
+                    <td style={{ padding: "7px 10px", color: "var(--tx-muted)", fontFamily: "var(--mono)" }}>{f.folio || "—"}</td>
+                    <td style={{ padding: "7px 10px", color: "var(--tx-muted)" }}>{f.fecha ? fmtDateMed(f.fecha) : "—"}</td>
+                    <td style={{ padding: "7px 10px", color: "var(--tx-muted)" }}>{f.vencimiento ? fmtDateMed(f.vencimiento) : "—"}</td>
+                    <td className="tabular" style={{ padding: "7px 10px", textAlign: "right", color: f.diasAtraso > 0 ? "var(--red)" : "var(--tx-faint)" }}>
+                      {f.diasAtraso != null && f.diasAtraso > 0 ? `${f.diasAtraso}d` : "—"}
+                    </td>
+                    <td className="tabular" style={{ padding: "7px 10px", textAlign: "right", color: "var(--tx)", fontWeight: 600 }}>{fmtM(f.monto)}</td>
+                    <td style={{ padding: "7px 10px", textAlign: "right" }}>
+                      {f.critica ? <StatusBadge level="violet" size="sm">Crítica</StatusBadge>
+                       : f.diasAtraso > 60 ? <StatusBadge level="red" size="sm">Vencida</StatusBadge>
+                       : f.diasAtraso > 0 ? <StatusBadge level="amber" size="sm">Atrasada</StatusBadge>
+                       : <StatusBadge level="green" size="sm">Al día</StatusBadge>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   );
+}
+
+function StatCard({ label, value, sub, color }) {
+  return (
+    <div style={{ background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px" }}>
+      <div style={{ fontSize: 10, color: "var(--tx-muted)", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 600, marginBottom: 6 }}>{label}</div>
+      <div className="serif tabular" style={{ fontSize: 18, fontWeight: 700, color: color || "var(--tx)", letterSpacing: -0.4, lineHeight: 1.1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 10.5, color: "var(--tx-muted)", marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function dsoColor(dso) {
+  if (dso == null) return "var(--tx-faint)";
+  if (dso <= 45) return "var(--green)";
+  if (dso <= 60) return "var(--amber)";
+  return "var(--red)";
 }
