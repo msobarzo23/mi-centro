@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import {
   TrendingUp, TrendingDown, AlertTriangle, Building2, PiggyBank,
   Wallet, Landmark, Calendar, Clock, ArrowDownRight, ArrowUpRight,
-  Sparkles, Receipt, Truck, CreditCard, Zap, CircleDot,
+  Sparkles, Receipt, Truck, CreditCard, Zap, CircleDot, Shield,
+  ChevronDown, ChevronUp,
 } from "lucide-react";
 import { KpiCard, SectionCard, DataTable, StatusBadge, EmptyState } from "../components/common.jsx";
 import { FileUploader } from "../components/FileUploader.jsx";
@@ -11,23 +12,29 @@ import {
   MESES_FULL, MESES_SHORT, pctChange,
 } from "../utils/format.js";
 
-export function Cockpit({ C, cobranzas, cobranzasRaw, uploadCobranzas, clearCobranzas, setTab }) {
+export function Cockpit({
+  C, cobranzas,
+  saldosRaw, uploadSaldos, clearSaldos,
+  historicoRaw, uploadHistorico, clearHistorico,
+  setTab,
+}) {
   if (!C) return null;
   const saludo = getSaludo();
   const hoy = new Date();
   const fechaLarga = fechaLargaFmt(hoy);
 
-  // Semáforos ejecutivos
   const semaforo = computeSemaforo(C);
 
-  // Las 3 métricas clave de Miguel
+  // Las 3 métricas clave de Miguel — v1.2
   const totalFalta = C.semanas.reduce((s, w) => s + w.falta, 0);
-  const tenemosParaResponder = C.liquidez90; // caja + DAP trabajo 90d + FFMM
+  // ⚡ CAMBIO v1.2: "Tenemos para responder" = liquidez operativa ESTRICTA
+  // Solo caja + DAP Trabajo 90d. Sin FFMM, sin DAP Inv, sin DAP Cred.
+  const tenemosParaResponder = C.liquidezOperativa90;
   const porRecibir90 = (cobranzas ? C.cobranzaEsperada90 : 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* ── HERO: saludo + semáforo ── */}
+      {/* ── HERO ── */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 20, flexWrap: "wrap" }}>
         <div>
           <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999, background: "var(--violet-bg)", border: "1px solid var(--violet)33", marginBottom: 10 }}>
@@ -42,27 +49,45 @@ export function Cockpit({ C, cobranzas, cobranzasRaw, uploadCobranzas, clearCobr
         <Semaforo s={semaforo} />
       </div>
 
-      {/* ── Uploader compacto o principal según estado ── */}
-      {cobranzasRaw ? (
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <FileUploader compact current={cobranzasRaw} onUpload={uploadCobranzas} />
+      {/* ── Uploaders: Saldos actuales (obligatorio) + Histórico largo (opcional) ── */}
+      {saldosRaw ? (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <FileUploader
+              compact current={saldosRaw}
+              onUpload={uploadSaldos}
+              title="Saldos actuales"
+            />
+            {historicoRaw ? (
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: 8,
+                padding: "6px 12px",
+                background: "var(--violet-bg)",
+                border: "1px solid var(--violet)44",
+                borderRadius: 999,
+                fontSize: 11,
+                color: "var(--violet)",
+              }}>
+                <Clock size={11} />
+                <span style={{ fontWeight: 600 }}>
+                  Histórico {historicoRaw.archivos?.length || 1} arch. ·{" "}
+                  {historicoRaw.fechaMin ? fmtDateMed(historicoRaw.fechaMin) : "?"} → {historicoRaw.fechaMax ? fmtDateMed(historicoRaw.fechaMax) : "?"}
+                </span>
+                <button onClick={clearHistorico} style={{
+                  background: "none", border: "none", color: "var(--tx-muted)", cursor: "pointer",
+                  padding: 0, display: "flex",
+                }} title="Quitar histórico"><ChevronUp size={11} style={{ transform: "rotate(45deg)" }} /></button>
+              </div>
+            ) : (
+              <HistoricoHint onUpload={uploadHistorico} />
+            )}
+          </div>
         </div>
       ) : (
-        <div style={{ background: "var(--bg-surface)", border: "1px solid var(--accent-border)", borderRadius: 14, padding: 20 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-            <AlertTriangle size={16} color="var(--accent)"/>
-            <span className="serif" style={{ fontSize: 15, fontWeight: 600, color: "var(--tx)" }}>
-              Para ver las cobranzas, sube el informe de Defontana
-            </span>
-          </div>
-          <div style={{ fontSize: 12, color: "var(--tx-muted)", marginBottom: 16, lineHeight: 1.5 }}>
-            Las pestañas "Por cobrar" y parte del "Flujo 90d" requieren este archivo. El resto del app funciona sin él.
-          </div>
-          <FileUploader onUpload={uploadCobranzas} onClear={clearCobranzas} current={cobranzasRaw} />
-        </div>
+        <SaldosSinArchivo onUploadSaldos={uploadSaldos} onUploadHistorico={uploadHistorico} historicoRaw={historicoRaw} />
       )}
 
-      {/* ── LAS 3 PREGUNTAS CLAVE DE MIGUEL ── */}
+      {/* ── LAS 3 PREGUNTAS CLAVE ── */}
       <div style={{
         background: "var(--bg-surface-2)",
         border: "1px solid var(--border)",
@@ -87,15 +112,16 @@ export function Cockpit({ C, cobranzas, cobranzasRaw, uploadCobranzas, clearCobr
             num="2"
             question="¿Cuánto tenemos para responder?"
             answer={fmtM(tenemosParaResponder)}
-            sub={`Caja ${fmtM(C.totalCaja)} + DAP Trabajo 90d ${fmtM(C.dapTrab90)} + FFMM ${fmtM(C.totalFondos)}`}
+            sub={`Caja ${fmtM(C.totalCaja)} + DAP Trabajo 90d ${fmtM(C.dapTrab90)} · Liquidez operativa estricta`}
             color="var(--teal)"
             colorBg="var(--teal-bg)"
             icon={Wallet}
             detail={[
               { label: "Caja bancaria", value: fmtM(C.totalCaja) },
-              { label: "DAP Trabajo (vence 90d)", value: fmtM(C.dapTrab90) },
-              { label: "Fondos mutuos", value: fmtM(C.totalFondos) },
-              { label: "Colchón DAP Inv. 30d", value: fmtM(C.dapInv30), muted: true },
+              { label: "DAP Trabajo (vence 30d)", value: fmtM(C.dapTrab30) },
+              { label: "DAP Trabajo (vence 31-60d)", value: fmtM(C.dapTrab60 - C.dapTrab30) },
+              { label: "DAP Trabajo (vence 61-90d)", value: fmtM(C.dapTrab90 - C.dapTrab60) },
+              { label: "Total operativo 90d", value: fmtM(C.liquidezOperativa90), bold: true },
             ]}
           />
           <QuestionCard
@@ -112,12 +138,15 @@ export function Cockpit({ C, cobranzas, cobranzasRaw, uploadCobranzas, clearCobr
             onClick={() => cobranzas && setTab("cobranzas")}
           />
         </div>
+
+        {/* Card: Colchón disponible (colapsable) */}
+        <ColchonCard C={C} />
       </div>
 
       {/* ── KPIs de contexto ── */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <KpiCard icon={Building2} label="Caja total" value={fmtM(C.totalCaja)} sub={Object.keys(C.saldosBancos).length + " bancos"} color="var(--teal)" colorBg="var(--teal-bg)" />
-        <KpiCard icon={PiggyBank} label="DAP vigentes" value={fmtM(C.totalDAPTrabajo + C.totalDAPInversion + C.totalDAPCredito)} sub={`Trab. ${fmtM(C.totalDAPTrabajo)} · Inv. ${fmtM(C.totalDAPInversion)}`} color="var(--violet)" colorBg="var(--violet-bg)" />
+        <KpiCard icon={PiggyBank} label="DAP Trabajo" value={fmtM(C.totalDAPTrabajo)} sub={`Disponible operación · Vence 90d: ${fmtM(C.dapTrab90)}`} color="var(--violet)" colorBg="var(--violet-bg)" />
         {cobranzas && (
           <KpiCard
             icon={Receipt}
@@ -216,11 +245,20 @@ export function Cockpit({ C, cobranzas, cobranzasRaw, uploadCobranzas, clearCobr
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16 }}>
         <SectionCard title="Cobertura de liquidez" icon={Landmark} color="var(--teal)">
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <RatioRow label="Liquidez 30 días" value={C.coberturaRatio30} monto={C.liquidez30} compromisos={C.totalCompromisos30} />
-            <RatioRow label="Liquidez 60 días" value={C.coberturaRatio60} monto={C.liquidez60} compromisos={C.totalCompromisos60} />
+            <RatioRow label="Operativa 30 días" value={C.coberturaRatio30} monto={C.liquidezOperativa30} compromisos={C.totalCompromisos30} />
+            <RatioRow label="Operativa 60 días" value={C.coberturaRatio60} monto={C.liquidezOperativa60} compromisos={C.totalCompromisos60} />
+            {C.coberturaRatioConColchon30 && C.colchonTotal > 0 && (
+              <RatioRow
+                label="30 días con colchón"
+                value={C.coberturaRatioConColchon30}
+                monto={C.liquidezOperativa30 + C.colchonTotal}
+                compromisos={C.totalCompromisos30}
+                soft
+              />
+            )}
           </div>
           <div style={{ marginTop: 14, padding: "10px 12px", background: "var(--bg-surface-2)", borderRadius: 8, fontSize: 11, color: "var(--tx-muted)", lineHeight: 1.5 }}>
-            <strong style={{ color: "var(--tx)" }}>Fórmula:</strong> (caja + DAP trabajo que vence ventana + FFMM) ÷ compromisos del calendario. Excluye DAP crédito y DAP inversión (colchón aparte).
+            <strong style={{ color: "var(--tx)" }}>Operativa</strong> = caja + DAP Trabajo que vence ventana. <strong style={{ color: "var(--tx)" }}>Con colchón</strong> = suma FFMM + DAP Inv + DAP Créd, solo emergencia.
           </div>
         </SectionCard>
 
@@ -232,14 +270,14 @@ export function Cockpit({ C, cobranzas, cobranzasRaw, uploadCobranzas, clearCobr
           </div>
           <div style={{ marginTop: 14, padding: "10px 12px", background: "var(--bg-surface-2)", borderRadius: 8, fontSize: 11, color: "var(--tx-muted)", lineHeight: 1.5 }}>
             {cobranzas
-              ? <>Ingresos = cobranzas estimadas por vencimiento + nueva facturación proyectada cobrada con lag. Egresos = calendario.</>
-              : <>Solo muestra egresos. Sube el archivo de cobranzas para ver ingresos.</>
+              ? <>Ingresos = cobranzas estimadas + nueva facturación proyectada con lag. Egresos = calendario.</>
+              : <>Solo muestra egresos. Sube el archivo de saldos para ver ingresos.</>
             }
           </div>
         </SectionCard>
       </div>
 
-      {/* ── Próximos 7 días: qué pasa ── */}
+      {/* ── Próximos 7 días ── */}
       <SectionCard title="Próximos 7 días" icon={Clock} color="var(--amber)">
         <AgendaProxima C={C} cobranzas={cobranzas} />
       </SectionCard>
@@ -247,7 +285,87 @@ export function Cockpit({ C, cobranzas, cobranzasRaw, uploadCobranzas, clearCobr
   );
 }
 
-// ── COMPONENTES INTERNOS ──
+// ══════════════════════════════════════════════════════════════════════
+// COMPONENTES INTERNOS
+// ══════════════════════════════════════════════════════════════════════
+
+// Card colapsable de "Colchón disponible"
+function ColchonCard({ C }) {
+  const [expanded, setExpanded] = useState(false);
+  if (C.colchonTotal === 0) return null;
+
+  return (
+    <div style={{
+      marginTop: 18,
+      background: "var(--bg-surface)",
+      border: "1px solid var(--violet)33",
+      borderRadius: 12,
+      overflow: "hidden",
+    }}>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          width: "100%",
+          padding: "14px 18px",
+          background: "transparent",
+          border: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          cursor: "pointer",
+          fontFamily: "inherit",
+          textAlign: "left",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ background: "var(--violet-bg)", borderRadius: 6, padding: 5, display: "flex" }}>
+            <Shield size={14} color="var(--violet)" strokeWidth={2.2} />
+          </div>
+          <div>
+            <div className="serif" style={{ fontSize: 14, fontWeight: 600, color: "var(--tx)" }}>
+              Colchón disponible
+            </div>
+            <div style={{ fontSize: 11, color: "var(--tx-muted)", marginTop: 1 }}>
+              FFMM + DAP Inversión + DAP Crédito · Solo para emergencia, no entra en operación normal
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span className="serif tabular" style={{ fontSize: 20, fontWeight: 700, color: "var(--violet)", letterSpacing: -0.6 }}>
+            {fmtM(C.colchonTotal)}
+          </span>
+          {expanded ? <ChevronUp size={14} color="var(--tx-muted)" /> : <ChevronDown size={14} color="var(--tx-muted)" />}
+        </div>
+      </button>
+      {expanded && (
+        <div className="fade-in" style={{ padding: "0 18px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
+          {C.colchonDesglose.map((d, i) => (
+            <div key={i} style={{
+              padding: "10px 12px",
+              background: "var(--bg-surface-2)",
+              borderRadius: 8,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 12,
+            }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--tx)" }}>{d.label}</div>
+                <div style={{ fontSize: 10.5, color: "var(--tx-muted)", marginTop: 1 }}>{d.costo}</div>
+              </div>
+              <div className="tabular" style={{ fontSize: 14, fontWeight: 700, color: d.monto > 0 ? "var(--tx)" : "var(--tx-faint)" }}>
+                {d.monto > 0 ? fmtM(d.monto) : "—"}
+              </div>
+            </div>
+          ))}
+          <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--tx-muted)", lineHeight: 1.5 }}>
+            <strong style={{ color: "var(--tx)" }}>Orden de rescate recomendado:</strong> primero FFMM (líquido, sin costo), luego DAP Inversión (pierde tasa devengada), al último DAP Crédito (está reservado para compra de terrenos).
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function QuestionCard({ num, question, answer, sub, color, colorBg, icon: Icon, detail, onClick }) {
   const [expanded, setExpanded] = useState(false);
@@ -288,9 +406,17 @@ function QuestionCard({ num, question, answer, sub, color, colorBg, icon: Icon, 
       {detail && expanded && (
         <div className="fade-in" style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 5 }}>
           {detail.map((d, i) => (
-            <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: d.muted ? "var(--tx-faint)" : "var(--tx-muted)" }}>
+            <div key={i} style={{
+              display: "flex", justifyContent: "space-between",
+              fontSize: 11.5,
+              color: d.muted ? "var(--tx-faint)" : "var(--tx-muted)",
+              fontWeight: d.bold ? 700 : 400,
+              paddingTop: d.bold ? 6 : 0,
+              borderTop: d.bold ? "1px dashed var(--border)" : "none",
+              marginTop: d.bold ? 4 : 0,
+            }}>
               <span>{d.label}</span>
-              <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, color: d.muted ? "var(--tx-faint)" : "var(--tx)" }}>{d.value}</span>
+              <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: d.bold ? 700 : 600, color: d.muted ? "var(--tx-faint)" : "var(--tx)" }}>{d.value}</span>
             </div>
           ))}
         </div>
@@ -299,13 +425,106 @@ function QuestionCard({ num, question, answer, sub, color, colorBg, icon: Icon, 
   );
 }
 
-function RatioRow({ label, value, monto, compromisos }) {
+// Hint compacto cuando no hay histórico subido
+function HistoricoHint({ onUpload }) {
+  const [dragOver, setDragOver] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleFiles = async (files) => {
+    const arr = Array.from(files).filter(f => f.name.match(/\.(xlsx|xls|xlsm)$/i));
+    if (arr.length === 0) { setError("Solo xlsx"); return; }
+    setLoading(true); setError(null);
+    try { await onUpload(arr); } catch (e) { setError(e.message || "error"); }
+    setLoading(false);
+  };
+
+  return (
+    <label
+      onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={e => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 8,
+        padding: "6px 12px",
+        background: dragOver ? "var(--violet-bg)" : "transparent",
+        border: `1px dashed ${dragOver ? "var(--violet)" : "var(--border-strong)"}`,
+        borderRadius: 999,
+        fontSize: 11,
+        color: "var(--tx-muted)",
+        cursor: "pointer",
+        transition: "all 0.15s",
+      }}
+      title="Sube un informe largo (ej. desde enero 2025) solo para clasificación histórica correcta"
+    >
+      <Clock size={11} />
+      <span style={{ fontWeight: 600 }}>{loading ? "Procesando..." : "+ Histórico largo (opcional)"}</span>
+      <input type="file" accept=".xlsx,.xls,.xlsm" multiple onChange={e => handleFiles(e.target.files)} style={{ display: "none" }} />
+      {error && <span style={{ color: "var(--red)" }}>{error}</span>}
+    </label>
+  );
+}
+
+// Uploaders en modo full cuando no hay ni saldos
+function SaldosSinArchivo({ onUploadSaldos, onUploadHistorico, historicoRaw }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 14 }}>
+      <div style={{
+        background: "var(--bg-surface)",
+        border: "1px solid var(--accent-border)",
+        borderRadius: 14,
+        padding: 20,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <AlertTriangle size={14} color="var(--accent)"/>
+          <span className="serif" style={{ fontSize: 14, fontWeight: 600, color: "var(--tx)" }}>
+            Saldos actuales <span style={{ color: "var(--red)", fontWeight: 500, fontSize: 11 }}>(requerido)</span>
+          </span>
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--tx-muted)", marginBottom: 14, lineHeight: 1.5 }}>
+          Informe por Análisis reciente con aperturas del año. Es el que usas semanalmente. Sube nacional (1110401001), internacional (1110401002) o ambos juntos.
+        </div>
+        <FileUploader
+          onUpload={onUploadSaldos}
+          title="Sube el informe de saldos"
+          description="Arrastra el .xlsx del Informe por Análisis. Puedes soltar los dos archivos (nac + intl) juntos."
+          current={null}
+        />
+      </div>
+
+      <div style={{
+        background: "var(--bg-surface)",
+        border: "1px solid var(--violet)33",
+        borderRadius: 14,
+        padding: 20,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <Clock size={14} color="var(--violet)"/>
+          <span className="serif" style={{ fontSize: 14, fontWeight: 600, color: "var(--tx)" }}>
+            Histórico largo <span style={{ color: "var(--tx-muted)", fontWeight: 500, fontSize: 11 }}>(opcional)</span>
+          </span>
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--tx-muted)", marginBottom: 14, lineHeight: 1.5 }}>
+          Informe amplio (ej. desde ene-2025). Solo se usa para clasificar: primera factura, tendencia 12m, distinguir "nuevo" vs "activo". Si no lo subes, se clasifica con los saldos actuales (menos fiable).
+        </div>
+        <FileUploader
+          onUpload={onUploadHistorico}
+          title="Sube el histórico"
+          description="Exporta un rango amplio (1 año+) de la cuenta 1110401001 y/o 1110401002."
+          current={historicoRaw}
+        />
+      </div>
+    </div>
+  );
+}
+
+function RatioRow({ label, value, monto, compromisos, soft }) {
   const color = value === null ? "var(--tx-muted)"
     : value >= 1.2 ? "var(--green)"
     : value >= 1 ? "var(--amber)"
     : "var(--red)";
   return (
-    <div>
+    <div style={{ opacity: soft ? 0.7 : 1 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
         <span style={{ fontSize: 12, color: "var(--tx-muted)" }}>{label}</span>
         <span style={{ fontSize: 14, fontWeight: 700, color, fontVariantNumeric: "tabular-nums" }}>
@@ -354,7 +573,6 @@ function AgendaProxima({ C, cobranzas }) {
   const now = new Date(); const n7 = new Date(); n7.setDate(n7.getDate() + 7);
   const items = [];
 
-  // Compromisos del calendario
   C.calendario.filter(r => r.fecha >= now && r.fecha <= n7).forEach(r => {
     items.push({
       fecha: r.fecha,
@@ -367,7 +585,6 @@ function AgendaProxima({ C, cobranzas }) {
     });
   });
 
-  // DAPs que vencen
   C.daps.filter(d => d.vencimiento >= now && d.vencimiento <= n7).forEach(d => {
     items.push({
       fecha: d.vencimiento,
@@ -380,7 +597,6 @@ function AgendaProxima({ C, cobranzas }) {
     });
   });
 
-  // Cobranzas (grandes facturas que vencen)
   if (cobranzas) {
     Object.values(cobranzas.porCliente).forEach(c => {
       c.facturasPendientes.filter(f => f.vencimiento && f.vencimiento >= now && f.vencimiento <= n7 && f.monto > 5000000).forEach(f => {
@@ -444,18 +660,15 @@ function AgendaProxima({ C, cobranzas }) {
   );
 }
 
-// ── Semáforo ejecutivo ──
 function computeSemaforo(C) {
   const signals = [];
-  // Cobertura 30d
   if (C.coberturaRatio30 !== null) {
     const r = C.coberturaRatio30;
     signals.push({
       level: r >= 1.2 ? "green" : r >= 1 ? "amber" : "red",
-      text: `Liquidez 30d ${r.toFixed(2)}x`,
+      text: `Operativa 30d ${r.toFixed(2)}x`,
     });
   }
-  // Falta 30d vs compromisos
   if (C.totalCompromisos30 > 0) {
     const pct = (C.totalFalta30 / C.totalCompromisos30) * 100;
     signals.push({
@@ -463,7 +676,6 @@ function computeSemaforo(C) {
       text: pct === 0 ? "Semanas cubiertas" : `Falta ${fmtM(C.totalFalta30)} en 30d`,
     });
   }
-  // Flujo neto 30d
   if (C.flujoNetoEsperado30 !== null) {
     signals.push({
       level: C.flujoNetoEsperado30 >= 0 ? "green" : "red",

@@ -1,23 +1,36 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   ResponsiveContainer, ComposedChart, CartesianGrid, XAxis, YAxis,
-  Tooltip, Legend, Bar, Line, ReferenceLine, Area,
+  Tooltip, Legend, Bar, Line, ReferenceLine, ReferenceArea,
 } from "recharts";
 import {
   Calendar, TrendingUp, TrendingDown, ArrowDownRight, ArrowUpRight,
-  Clock, Info, Receipt, PiggyBank, CreditCard, Truck,
+  Clock, Info, Receipt, PiggyBank, CreditCard, Truck, Shield,
+  AlertTriangle, ChevronDown, ChevronUp,
 } from "lucide-react";
-import { SectionCard, KpiCard, DataTable, StatusBadge, EmptyState } from "../components/common.jsx";
-import { ChartTooltip } from "../components/common.jsx";
+import { SectionCard, KpiCard, DataTable, StatusBadge, EmptyState, ChartTooltip } from "../components/common.jsx";
 import {
   fmtM, fmtFull, fmtDateMed, fmtDateShort, fmtPct, todayMidnight,
   startOfWeek, endOfWeek, MESES_SHORT,
 } from "../utils/format.js";
+import { buildSugerenciasRescate, formatPlan } from "../utils/rescate.js";
 
 export function FlujoCaja({ C, cobranzas }) {
   const flujo = useMemo(() => buildFlujo(C, cobranzas), [C, cobranzas]);
+  const sugerencias = useMemo(() => {
+    if (!C) return {};
+    return buildSugerenciasRescate(flujo.semanas, {
+      fondos: C.fondos || [],
+      dapsInv: C.dapsInversion || [],
+      dapsCred: C.dapsCredito || [],
+    });
+  }, [flujo.semanas, C]);
 
   if (!C) return null;
+
+  // Referencia horizontal del "colchón" en MM (positivo arriba de cero para referencia visual
+  // del pool disponible; también marcamos -colchonTotal como "piso real" si se usa todo)
+  const colchonMM = (C.colchonTotal || 0) / 1e6;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -26,7 +39,7 @@ export function FlujoCaja({ C, cobranzas }) {
           Flujo de caja proyectado
         </h1>
         <p style={{ fontSize: 13, color: "var(--tx-muted)" }}>
-          Próximas 13 semanas · ingresos esperados vs compromisos · caja rodante
+          Próximas 13 semanas · ingresos esperados vs compromisos · caja rodante con colchón disponible
         </p>
       </div>
 
@@ -36,7 +49,7 @@ export function FlujoCaja({ C, cobranzas }) {
           icon={ArrowDownRight}
           label="Ingresos esperados 90d"
           value={fmtM(flujo.totalIngresos90)}
-          sub={cobranzas ? `${fmtM(flujo.totalCobranzasExistentes)} cobranzas + ${fmtM(flujo.totalCobranzasNuevas)} nueva facturación + ${fmtM(flujo.totalDAPsVence)} DAPs` : "Sin cobranzas cargadas"}
+          sub={cobranzas ? `${fmtM(flujo.totalCobranzasExistentes)} cobranzas + ${fmtM(flujo.totalCobranzasNuevas)} nueva facturación + ${fmtM(flujo.totalDAPsVence)} DAPs trabajo` : "Sin cobranzas cargadas"}
           color="var(--green)"
           colorBg="var(--green-bg)"
           highlight
@@ -59,34 +72,53 @@ export function FlujoCaja({ C, cobranzas }) {
           colorBg={flujo.totalIngresos90 - C.totalCompromisos90 >= 0 ? "var(--green-bg)" : "var(--red-bg)"}
         />
         <KpiCard
-          icon={Clock}
-          label="Caja proyectada final 90d"
-          value={fmtM(flujo.cajaFinal90)}
-          sub={flujo.semanasNegativas > 0 ? `⚠ ${flujo.semanasNegativas} semanas con saldo negativo` : "Siempre positivo"}
-          color={flujo.cajaFinal90 >= 0 ? "var(--teal)" : "var(--red)"}
-          colorBg={flujo.cajaFinal90 >= 0 ? "var(--teal-bg)" : "var(--red-bg)"}
+          icon={Shield}
+          label="Colchón disponible"
+          value={fmtM(C.colchonTotal || 0)}
+          sub={`FFMM ${fmtM(C.colchonFFMM)} + DAP Inv ${fmtM(C.colchonDAPInv)} + DAP Créd ${fmtM(C.colchonDAPCred)}`}
+          color="var(--violet)"
+          colorBg="var(--violet-bg)"
         />
       </div>
 
-      {/* Gráfico: barras de flujo + línea de caja acumulada */}
+      {/* Alert: si la caja cae bajo cero en algún momento */}
+      {flujo.semanasNegativas > 0 && (
+        <AlertaRescate
+          semanas={flujo.semanas}
+          sugerencias={sugerencias}
+          colchonTotal={C.colchonTotal || 0}
+        />
+      )}
+
+      {/* Gráfico con línea de colchón */}
       <SectionCard
         title="Flujo semanal y caja rodante"
         subtitle={
-          cobranzas
-            ? "Barras verdes = ingresos esperados · Rojas = egresos · Línea ámbar = caja proyectada acumulada"
-            : "Solo egresos (sube archivo de cobranzas para ver ingresos)"
+          <>
+            Barras verdes = ingresos · Rojas = egresos · Línea ámbar = caja proyectada
+            {colchonMM > 0 && <> · Línea violeta punteada = techo del colchón (−{fmtM(C.colchonTotal)})</>}
+          </>
         }
         icon={Calendar}
         color="var(--accent)"
       >
-        <ResponsiveContainer width="100%" height={340}>
+        <ResponsiveContainer width="100%" height={360}>
           <ComposedChart data={flujo.chartData} margin={{ top: 8, right: 8, bottom: 8, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
             <XAxis dataKey="label" tick={{ fill: "var(--tx-muted)", fontSize: 10 }} axisLine={false} tickLine={false} angle={-20} textAnchor="end" height={55} interval={0} />
-            <YAxis tick={{ fill: "var(--tx-muted)", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}M`} width={55} />
+            <YAxis tick={{ fill: "var(--tx-muted)", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}M`} width={60} />
             <Tooltip content={<ChartTooltip formatter={v => v != null ? `$${v.toFixed(1)}M` : "—"} />} />
             <Legend wrapperStyle={{ fontSize: 11, color: "var(--tx-muted)" }} />
-            <ReferenceLine y={0} stroke="var(--tx-faint)" />
+            <ReferenceLine y={0} stroke="var(--tx-faint)" strokeWidth={1} />
+            {colchonMM > 0 && (
+              <ReferenceLine
+                y={-colchonMM}
+                stroke="var(--violet)"
+                strokeDasharray="6 4"
+                strokeWidth={1.5}
+                label={{ value: `Piso con colchón (−${fmtM(C.colchonTotal)})`, position: "insideTopRight", fill: "var(--violet)", fontSize: 10, fontWeight: 600 }}
+              />
+            )}
             <Bar dataKey="ingresos" fill="var(--green)" fillOpacity={0.85} name="Ingresos" radius={[3, 3, 0, 0]} />
             <Bar dataKey="egresos" fill="var(--red)" fillOpacity={0.85} name="Egresos" radius={[3, 3, 0, 0]} />
             <Line dataKey="cajaAcumulada" type="monotone" stroke="var(--accent)" strokeWidth={2.5} dot={{ r: 3, fill: "var(--accent)" }} name="Caja acumulada" />
@@ -94,10 +126,10 @@ export function FlujoCaja({ C, cobranzas }) {
         </ResponsiveContainer>
       </SectionCard>
 
-      {/* Tabla semana a semana */}
+      {/* Tabla semana a semana con badges de rescate */}
       <SectionCard
         title="Detalle semana a semana"
-        subtitle="Primera semana = esta · Caja inicial = caja actual, luego se arrastra"
+        subtitle="Primera semana = esta · Caja inicial = caja actual, luego se arrastra · Badge en semanas negativas = plan de rescate"
         icon={Calendar}
         color="var(--accent)"
       >
@@ -105,10 +137,10 @@ export function FlujoCaja({ C, cobranzas }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>
               <tr>
-                {["Sem", "Período", "Caja inicial", "Ingresos", "Egresos", "Neto", "Caja final", "Estado"].map((h, i) => (
+                {["Sem", "Período", "Caja inicial", "Ingresos", "Egresos", "Neto", "Caja final", "Estado / Rescate"].map((h, i) => (
                   <th key={i} style={{
                     padding: "10px 10px",
-                    textAlign: i <= 1 ? "left" : "right",
+                    textAlign: i <= 1 ? "left" : (i === 7 ? "left" : "right"),
                     color: "var(--tx-muted)",
                     fontWeight: 600,
                     fontSize: 10.5,
@@ -121,45 +153,48 @@ export function FlujoCaja({ C, cobranzas }) {
               </tr>
             </thead>
             <tbody>
-              {flujo.semanas.map((s, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
-                  <td style={{ padding: "8px 10px", color: "var(--tx)", fontWeight: 600 }}>
-                    S{i + 1}
-                    {i === 0 && <StatusBadge level="blue" size="sm" children="ACTUAL" />}
-                  </td>
-                  <td style={{ padding: "8px 10px", color: "var(--tx-muted)", fontSize: 11.5 }}>{s.label}</td>
-                  <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: "var(--tx-muted)" }}>
-                    {fmtM(s.cajaInicial)}
-                  </td>
-                  <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: s.ingresos > 0 ? "var(--green)" : "var(--tx-faint)" }}>
-                    {s.ingresos > 0 ? "+" + fmtM(s.ingresos) : "—"}
-                  </td>
-                  <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: s.egresos > 0 ? "var(--red)" : "var(--tx-faint)" }}>
-                    {s.egresos > 0 ? "−" + fmtM(s.egresos) : "—"}
-                  </td>
-                  <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: s.neto >= 0 ? "var(--green)" : "var(--red)", fontWeight: 600 }}>
-                    {s.neto >= 0 ? "+" : ""}{fmtM(s.neto)}
-                  </td>
-                  <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: s.cajaFinal >= 0 ? "var(--tx)" : "var(--red)", fontWeight: 700 }}>
-                    {fmtM(s.cajaFinal)}
-                  </td>
-                  <td style={{ padding: "8px 10px", textAlign: "right" }}>
-                    {s.cajaFinal < 0 ? (
-                      <StatusBadge level="red" size="sm">⚠ Negativa</StatusBadge>
-                    ) : s.cajaFinal < 100000000 ? (
-                      <StatusBadge level="amber" size="sm">Baja</StatusBadge>
-                    ) : (
-                      <StatusBadge level="green" size="sm">OK</StatusBadge>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {flujo.semanas.map((s, i) => {
+                const sug = sugerencias[i];
+                return (
+                  <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "8px 10px", color: "var(--tx)", fontWeight: 600 }}>
+                      S{i + 1}
+                      {i === 0 && <StatusBadge level="blue" size="sm" children="ACTUAL" />}
+                    </td>
+                    <td style={{ padding: "8px 10px", color: "var(--tx-muted)", fontSize: 11.5 }}>{s.label2 || s.label}</td>
+                    <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: s.cajaInicial >= 0 ? "var(--tx-muted)" : "var(--red)" }}>
+                      {fmtM(s.cajaInicial)}
+                    </td>
+                    <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: s.ingresos > 0 ? "var(--green)" : "var(--tx-faint)" }}>
+                      {s.ingresos > 0 ? "+" + fmtM(s.ingresos) : "—"}
+                    </td>
+                    <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: s.egresos > 0 ? "var(--red)" : "var(--tx-faint)" }}>
+                      {s.egresos > 0 ? "−" + fmtM(s.egresos) : "—"}
+                    </td>
+                    <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: s.neto >= 0 ? "var(--green)" : "var(--red)", fontWeight: 600 }}>
+                      {s.neto >= 0 ? "+" : ""}{fmtM(s.neto)}
+                    </td>
+                    <td className="tabular" style={{ padding: "8px 10px", textAlign: "right", color: s.cajaFinal >= 0 ? "var(--tx)" : "var(--red)", fontWeight: 700 }}>
+                      {fmtM(s.cajaFinal)}
+                    </td>
+                    <td style={{ padding: "8px 10px" }}>
+                      {s.cajaFinal >= 0 ? (
+                        s.cajaFinal < 100000000
+                          ? <StatusBadge level="amber" size="sm">Baja</StatusBadge>
+                          : <StatusBadge level="green" size="sm">OK</StatusBadge>
+                      ) : (
+                        <RescateBadge sug={sug} />
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       </SectionCard>
 
-      {/* Desglose de ingresos y egresos */}
+      {/* Desglose */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 16 }}>
         <SectionCard title="Desglose ingresos 90 días" icon={ArrowDownRight} color="var(--green)">
           <DesgloseIngresos flujo={flujo} cobranzas={cobranzas} />
@@ -169,7 +204,7 @@ export function FlujoCaja({ C, cobranzas }) {
         </SectionCard>
       </div>
 
-      {/* Aclaración metodológica */}
+      {/* Metodología */}
       <div style={{ background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 18px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <Info size={14} color="var(--accent)" />
@@ -178,19 +213,17 @@ export function FlujoCaja({ C, cobranzas }) {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16, fontSize: 11.5, color: "var(--tx-muted)", lineHeight: 1.6 }}>
           <div>
             <strong style={{ color: "var(--tx)", display: "block", marginBottom: 4 }}>Ingresos esperados</strong>
-            <span style={{ color: "var(--green)" }}>Cobranzas existentes:</span> facturas pendientes del archivo de Defontana, asignadas a la semana de su vencimiento real.
-            <br/>
-            <span style={{ color: "var(--green)" }}>Nueva facturación:</span> lo que me falta facturar este mes + facturación proyectada del mes siguiente (usando viajes × tasa histórica por cliente), cobrada 30-60 días después.
-            <br/>
-            <span style={{ color: "var(--green)" }}>DAPs:</span> vencimientos de DAPs Trabajo en cada semana.
+            <span style={{ color: "var(--green)" }}>Cobranzas existentes:</span> facturas del archivo asignadas a la semana de su vencimiento real.<br/>
+            <span style={{ color: "var(--green)" }}>Nueva facturación:</span> falta facturar del mes + proyección mes siguiente, cobrada con lag 45-75d.<br/>
+            <span style={{ color: "var(--green)" }}>DAPs Trabajo:</span> solo vencimientos de trabajo (Inv y Créd NO entran aquí).
           </div>
           <div>
             <strong style={{ color: "var(--tx)", display: "block", marginBottom: 4 }}>Egresos</strong>
-            Todo lo que tienes en tu calendario financiero (columna Monto). La columna "Falta" no se usa aquí — solo en el semáforo del Cockpit. Para el flujo asumo que los compromisos se pagan como los tienes agendados, con o sin dinero.
+            Calendario financiero (columna Monto). Se asume que se pagan como los tienes agendados. La columna "Falta" solo se usa en el semáforo del Cockpit.
           </div>
           <div>
-            <strong style={{ color: "var(--tx)", display: "block", marginBottom: 4 }}>Caja rodante</strong>
-            Caja inicial S1 = caja bancaria actual. Luego: caja_final = caja_inicial + ingresos − egresos. Se arrastra semana a semana. No asumo rescates de DAP Inversión ni de FFMM — esos son colchones que no proyecto.
+            <strong style={{ color: "var(--tx)", display: "block", marginBottom: 4 }}>Colchón</strong>
+            Caja inicial S1 = caja bancaria actual. Si la caja rodante cae a negativo, el plan de rescate sugiere qué rescatar del colchón (FFMM primero, luego DAP Inv, al final DAP Créd). El piso real con colchón = −$colchón total.
           </div>
         </div>
       </div>
@@ -199,12 +232,154 @@ export function FlujoCaja({ C, cobranzas }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// Alerta de rescate — cuando hay semanas negativas
+// ══════════════════════════════════════════════════════════════════════
+function AlertaRescate({ semanas, sugerencias, colchonTotal }) {
+  const [expanded, setExpanded] = useState(true);
+  const negativas = semanas.filter(s => s.cajaFinal < 0);
+  const peor = negativas.reduce((m, s) => s.cajaFinal < m.cajaFinal ? s : m, negativas[0]);
+  const peorIdx = semanas.indexOf(peor);
+  const peorNecesitado = Math.abs(peor.cajaFinal);
+  const cubreTodo = colchonTotal >= peorNecesitado;
 
+  return (
+    <div style={{
+      background: cubreTodo ? "var(--amber-bg)" : "var(--red-bg)",
+      border: `1px solid ${cubreTodo ? "var(--amber-border)" : "var(--red-border)"}`,
+      borderRadius: 12,
+      overflow: "hidden",
+    }}>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          width: "100%",
+          padding: "14px 18px",
+          background: "transparent",
+          border: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          cursor: "pointer",
+          fontFamily: "inherit",
+          textAlign: "left",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <AlertTriangle size={18} color={cubreTodo ? "var(--amber)" : "var(--red)"} />
+          <div>
+            <div className="serif" style={{ fontSize: 14, fontWeight: 700, color: cubreTodo ? "var(--amber)" : "var(--red)" }}>
+              {cubreTodo
+                ? `Caja cae negativa en ${negativas.length} semana${negativas.length > 1 ? "s" : ""} — el colchón alcanza`
+                : `Caja cae negativa en ${negativas.length} semana${negativas.length > 1 ? "s" : ""} — colchón insuficiente`
+              }
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--tx-muted)", marginTop: 2 }}>
+              Peor punto: S{peorIdx + 1} ({peor.label2 || peor.label}) con {fmtM(peor.cajaFinal)}. Colchón total: {fmtM(colchonTotal)}.
+            </div>
+          </div>
+        </div>
+        {expanded ? <ChevronUp size={14} color="var(--tx-muted)" /> : <ChevronDown size={14} color="var(--tx-muted)" />}
+      </button>
+      {expanded && (
+        <div className="fade-in" style={{ padding: "0 18px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
+          {negativas.slice(0, 5).map((s, i) => {
+            const idx = semanas.indexOf(s);
+            const sug = sugerencias[idx];
+            if (!sug) return null;
+            return (
+              <div key={i} style={{
+                padding: "10px 12px",
+                background: "var(--bg-surface-2)",
+                borderRadius: 8,
+                fontSize: 12,
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <strong style={{ color: "var(--tx)" }}>
+                    S{idx + 1} · {s.label2 || s.label} — caja {fmtM(s.cajaFinal)}
+                  </strong>
+                  {sug.faltante > 0 && (
+                    <span style={{ fontSize: 10, color: "var(--red)", fontWeight: 700, padding: "2px 8px", background: "var(--red-bg)", borderRadius: 999 }}>
+                      FALTAN {fmtM(sug.faltante)}
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {sug.plan.map((p, pi) => (
+                    <span key={pi} style={{
+                      display: "inline-flex", alignItems: "center", gap: 4,
+                      padding: "3px 10px",
+                      background: "var(--violet-bg)",
+                      border: `1px solid var(--violet)33`,
+                      borderRadius: 999,
+                      fontSize: 11,
+                      color: "var(--violet)",
+                      fontWeight: 600,
+                    }}>
+                      {p.tipo === "ffmm" ? "FFMM" : p.tipo === "dap_inv" ? "DAP Inv" : "DAP Créd"}
+                      <span style={{ color: "var(--tx)" }}>{fmtM(p.monto)}</span>
+                      <span style={{ color: "var(--tx-muted)", fontSize: 10 }}>{p.label}</span>
+                      {p.rompe && <span style={{ fontSize: 9, color: "var(--red)" }}>⚡ rompe</span>}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RescateBadge({ sug }) {
+  const [hover, setHover] = useState(false);
+  if (!sug) return <StatusBadge level="red" size="sm">⚠ Negativa</StatusBadge>;
+
+  const color = sug.faltante > 0 ? "var(--red)" : "var(--violet)";
+  const bg = sug.faltante > 0 ? "var(--red-bg)" : "var(--violet-bg)";
+
+  return (
+    <div style={{ position: "relative", display: "inline-block" }} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+      <span style={{
+        display: "inline-flex", alignItems: "center", gap: 4,
+        padding: "3px 10px",
+        background: bg,
+        border: `1px solid ${color}33`,
+        borderRadius: 999,
+        fontSize: 10.5,
+        fontWeight: 700,
+        color,
+        cursor: "help",
+      }}>
+        <Shield size={10} /> Rescatar {fmtM(sug.cubierto)}
+        {sug.faltante > 0 && <span style={{ color: "var(--red)" }}> · falta {fmtM(sug.faltante)}</span>}
+      </span>
+      {hover && sug.plan.length > 0 && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 6px)", right: 0,
+          background: "var(--tooltip-bg)", color: "var(--tooltip-tx)",
+          border: `1px solid ${color}55`, borderRadius: 10,
+          padding: "10px 12px", fontSize: 11, lineHeight: 1.5,
+          zIndex: 30, boxShadow: "0 8px 24px rgba(0,0,0,0.35)", minWidth: 220, whiteSpace: "nowrap",
+        }}>
+          <div style={{ fontWeight: 700, marginBottom: 4, color }}>Plan de rescate</div>
+          {sug.plan.map((p, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 2 }}>
+              <span>{p.label}{p.rompe && " ⚡"}</span>
+              <span style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fmtM(p.monto)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════
 function buildFlujo(C, cobranzas) {
   const today = todayMidnight();
-  const N_SEMANAS = 13; // 90 días aprox
+  const N_SEMANAS = 13;
 
-  // Armar buckets
   const semanas = [];
   for (let w = 0; w < N_SEMANAS; w++) {
     const inicio = startOfWeek(new Date(today.getTime() + w * 7 * 86400000));
@@ -221,7 +396,7 @@ function buildFlujo(C, cobranzas) {
     });
   }
 
-  // EGRESOS = calendario
+  // EGRESOS
   C.calendario.filter(r => r.fecha >= today).forEach(r => {
     for (const s of semanas) {
       if (r.fecha >= s.inicio && r.fecha <= s.fin) {
@@ -232,16 +407,15 @@ function buildFlujo(C, cobranzas) {
     }
   });
 
-  // INGRESOS: (1) Facturas pendientes del archivo (excluye facturas críticas >180d)
+  // INGRESOS: (1) Facturas pendientes del archivo
   let totalCobranzasExistentes = 0;
   if (cobranzas) {
     Object.values(cobranzas.porCliente).forEach(c => {
       c.facturasPendientes.forEach(f => {
-        if (f.critica) return; // Facturas >180d no son ingreso esperado automático
+        if (f.critica) return;
         if (!f.vencimiento) return;
-        // Si ya venció, ponerla en la semana 1 (asumimos se cobra pronto, pero en realidad deberíamos destacar que está vencida)
         let targetDate = f.vencimiento;
-        if (targetDate < today) targetDate = today; // ya vencida → se espera esta semana
+        if (targetDate < today) targetDate = today;
         for (const s of semanas) {
           if (targetDate >= s.inicio && targetDate <= s.fin) {
             s.ingresos += f.monto;
@@ -260,23 +434,16 @@ function buildFlujo(C, cobranzas) {
     });
   }
 
-  // INGRESOS: (2) Nueva facturación — cobrada con lag
-  // Lo que me falta facturar este mes → cobro a ~45 días (semana 6-7)
-  // Lo que voy a facturar el mes que viene → cobro a ~75 días (semana 11-12)
+  // INGRESOS: (2) Nueva facturación
   let totalCobranzasNuevas = 0;
   if (C.faltaFacturarMesActual > 0) {
-    // Distribuir en semanas 6 a 9 (aprox 1.5 meses desde hoy)
     const monto = C.faltaFacturarMesActual;
-    const targetSemanas = [5, 6, 7, 8]; // índices 0-based (semanas 6,7,8,9)
+    const targetSemanas = [5, 6, 7, 8];
     const parte = monto / targetSemanas.length;
     targetSemanas.forEach(idx => {
       if (semanas[idx]) {
         semanas[idx].ingresos += parte;
-        semanas[idx].detallesIng.push({
-          concepto: "Nueva facturación mes actual (lag cobranza)",
-          monto: parte,
-          tipo: "nueva",
-        });
+        semanas[idx].detallesIng.push({ concepto: "Nueva facturación mes actual (lag cobranza)", monto: parte, tipo: "nueva" });
       }
     });
     totalCobranzasNuevas += monto;
@@ -288,17 +455,13 @@ function buildFlujo(C, cobranzas) {
     targetSemanas.forEach(idx => {
       if (semanas[idx]) {
         semanas[idx].ingresos += parte;
-        semanas[idx].detallesIng.push({
-          concepto: "Facturación proyectada mes siguiente (viajes × tasa)",
-          monto: parte,
-          tipo: "proy",
-        });
+        semanas[idx].detallesIng.push({ concepto: "Facturación proyectada mes siguiente (viajes × tasa)", monto: parte, tipo: "proy" });
       }
     });
     totalCobranzasNuevas += monto;
   }
 
-  // INGRESOS: (3) DAPs que vencen
+  // INGRESOS: (3) DAPs Trabajo que vencen
   let totalDAPsVence = 0;
   C.daps.filter(d => d.vencimiento && d.vencimiento >= today && d.tipo === "trabajo").forEach(d => {
     const venc = d.vencimiento;
@@ -306,19 +469,14 @@ function buildFlujo(C, cobranzas) {
       if (venc >= s.inicio && venc <= s.fin) {
         const monto = d.montoFinal || d.monto;
         s.ingresos += monto;
-        s.detallesIng.push({
-          fecha: venc,
-          concepto: `DAP ${d.banco} vence`,
-          monto,
-          tipo: "dap",
-        });
+        s.detallesIng.push({ fecha: venc, concepto: `DAP ${d.banco} vence`, monto, tipo: "dap" });
         totalDAPsVence += monto;
         break;
       }
     }
   });
 
-  // Construir caja rodante
+  // Caja rodante
   let caja = C.totalCaja;
   semanas.forEach(s => {
     s.cajaInicial = caja;
@@ -331,11 +489,10 @@ function buildFlujo(C, cobranzas) {
   const cajaFinal90 = semanas[semanas.length - 1]?.cajaFinal || 0;
   const semanasNegativas = semanas.filter(s => s.cajaFinal < 0).length;
 
-  // Chart data
   const chartData = semanas.map(s => ({
     label: s.label,
     ingresos: s.ingresos / 1e6,
-    egresos: -s.egresos / 1e6, // negativo para verse debajo
+    egresos: -s.egresos / 1e6,
     cajaAcumulada: s.cajaFinal / 1e6,
   }));
 
@@ -358,7 +515,7 @@ function DesgloseIngresos({ flujo, cobranzas }) {
   const items = [
     { label: "Cobranzas existentes", monto: flujo.totalCobranzasExistentes, desc: "Facturas ya emitidas que vencen próx. 90d", icon: Receipt, color: "var(--accent)" },
     { label: "Nueva facturación (lag)", monto: flujo.totalCobranzasNuevas, desc: "Viajes a facturar × tasa histórica, cobrados 45-75d", icon: Truck, color: "var(--teal)" },
-    { label: "DAPs trabajo vencen", monto: flujo.totalDAPsVence, desc: "DAPs Trabajo disponibles en ventana", icon: PiggyBank, color: "var(--violet)" },
+    { label: "DAPs Trabajo vencen", monto: flujo.totalDAPsVence, desc: "DAPs Trabajo disponibles en ventana (no incluye Inv ni Créd)", icon: PiggyBank, color: "var(--violet)" },
   ];
   const total = flujo.totalIngresos90;
   return (
@@ -385,7 +542,6 @@ function DesgloseIngresos({ flujo, cobranzas }) {
 }
 
 function DesgloseEgresos({ flujo, C }) {
-  // Clasificar compromisos del calendario por categoría
   const categorias = {};
   const today = todayMidnight();
   const limit = new Date(today); limit.setDate(limit.getDate() + 90);
