@@ -10,7 +10,7 @@ import { FlujoCaja } from "./tabs/FlujoCaja.jsx";
 import { Cobranzas } from "./tabs/Cobranzas.jsx";
 import { CicloViajes } from "./tabs/CicloViajes.jsx";
 import { Clientes360 } from "./tabs/Clientes360.jsx";
-import { fmtDateTime } from "./utils/format.js";
+import { fmtDateTime } from "./utils/helpers_v2.js";
 
 const TABS = [
   { id: "cockpit", label: "Cockpit", icon: LayoutDashboard },
