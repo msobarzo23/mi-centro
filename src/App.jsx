@@ -180,9 +180,9 @@ export default function App() {
             C={C}
           />
         )}
-        {tab === "ciclo" && (
-          <CicloViajes C={C} cobranzas={cobranzas} />
-        )}
+       {tab === "ciclo" && (
+  <CicloViajes C={C} cobranzas={cobranzas} sheets={sheets} />
+)}
         {tab === "clientes" && (
           <Clientes360
             saldosRaw={saldosRaw}
