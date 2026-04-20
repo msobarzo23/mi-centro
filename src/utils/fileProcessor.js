@@ -3,6 +3,15 @@ import { parseDate, parseNum, normName, daysBetween, todayMidnight } from "./hel
 import { CLIENTE_PAGO_DIAS } from "../config/sources.js";
 
 // ══════════════════════════════════════════════════════════════════════
+// fileProcessor v1.3.2 — matching exacto por folio (columna N "Número Doc.")
+// Si Miguel ve este string en la consola, el código nuevo SÍ está corriendo.
+// ══════════════════════════════════════════════════════════════════════
+export const FILE_PROCESSOR_VERSION = "1.3.2";
+if (typeof window !== "undefined") {
+  console.log("[mi-centro] fileProcessor v" + FILE_PROCESSOR_VERSION + " cargado");
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // PROCESADOR DEL ARCHIVO "Informe por Análisis" de Defontana
 // 100% local en el navegador, nada sale del equipo
 // Soporta cuentas:
@@ -228,17 +237,22 @@ export function computeCobranzas(procesado, todayRef = null) {
     let pagosCount = 0;
 
     porFolio.forEach((rows, folio) => {
-      // Separar cargos (facturas + reversiones + APERTURA) y abonos (pagos + notas crédito)
-      const cargos = rows.filter(r => r.cargo > 0).sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
+      // Separar: facturas reales (Vta_* con cargo), reversiones (INGRESO con cargo) y abonos
+      // CRÍTICO: los INGRESO con cargo > 0 NO son facturas — son reversiones de pago.
+      // Se restan del total abonado, no se suman al total de cargos.
+      const facturas = rows.filter(r => r.cargo > 0 && r.tipo !== "INGRESO").sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
+      const reversiones = rows.filter(r => r.cargo > 0 && r.tipo === "INGRESO");
       const abonos = rows.filter(r => r.abono > 0).sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
 
-      if (cargos.length === 0) return; // folio solo con abonos sueltos → ignorar aquí
+      if (facturas.length === 0) return; // folio solo con abonos sueltos (factura emitida fuera del rango) → ignorar
 
-      const totalCargos = cargos.reduce((s, r) => s + r.cargo, 0);
+      const totalFacturas = facturas.reduce((s, r) => s + r.cargo, 0);
+      const totalReversiones = reversiones.reduce((s, r) => s + r.cargo, 0);
       const totalAbonos = abonos.reduce((s, r) => s + r.abono, 0);
-      const saldoFolio = totalCargos - totalAbonos;
+      const abonosNetos = totalAbonos - totalReversiones;
+      const saldoFolio = totalFacturas - abonosNetos;
 
-      const primerCargo = cargos[0];
+      const primerCargo = facturas[0]; // siempre una Vta_* o APERTURA
       if (primerCargo.tipo !== "APERTURA") facturasCount++;
       pagosCount += abonos.length;
 
@@ -250,7 +264,7 @@ export function computeCobranzas(procesado, todayRef = null) {
           if (dias !== null && dias >= 0 && dias < 730) {
             dsoSamples.push({
               dias,
-              monto: totalCargos,
+              monto: totalFacturas,
               folio,
               fechaEmision: primerCargo.fecha,
               fechaPago: ultimoAbono.fecha,
@@ -271,8 +285,8 @@ export function computeCobranzas(procesado, todayRef = null) {
         fecha: primerCargo.fecha,
         vencimiento: venc,
         monto: saldoFolio,
-        montoOriginal: totalCargos,
-        montoPagado: totalAbonos,
+        montoOriginal: totalFacturas,
+        montoPagado: abonosNetos,
         documento: primerCargo.documento,
         diasAtraso,
         tipo: primerCargo.tipo,
