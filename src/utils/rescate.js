@@ -10,7 +10,7 @@
 //   3. DAP Crédito    — último recurso (está amarrado a compra terrenos)
 // ══════════════════════════════════════════════════════════════════════
 
-import { fmtM } from "./format.js";
+import { fmtM } from "./helpers_v2.js";
 
 // Dado un flujo semanal (array de semanas con {inicio, fin, cajaFinal}) y
 // el colchón disponible (FFMM + DAP Inv + DAP Cred), genera sugerencias

@@ -10,7 +10,7 @@
 
 import {
   fmtM, fmtFull, daysBetween, todayMidnight,
-} from './format.js';
+} from './helpers_v2.js';
 
 // ──────────────────────────────────────────────────────────────────────
 // Umbrales de clasificación
