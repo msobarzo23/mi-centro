@@ -1,31 +1,28 @@
 // src/utils/clientesMaestro.js
 //
 // Motor de cálculos puros para el tab "Clientes 360".
-// Agrega por cliente cruzando: filas crudas del xlsx Defontana, el objeto
-// `cobranzas` ya computado por fileProcessor.js, y (opcionalmente) datos
-// de viajes desde la fuente de operaciones.
 //
-// El DSO real se calcula vía FIFO implícito: asigno abonos a cargos en
-// orden cronológico; para cada cargo que queda 100% saldado registro la
-// fecha del abono que lo completó → DSO = avg(fecha_pago − fecha_emisión)
-// ponderado por monto. Esto reemplaza el matcheo por folio del v1 porque
-// en este archivo Defontana la columna "Número Doc. Pago" viene vacía.
+// v1.2: Acepta un histórico largo opcional (`historicoRows`) que se usa
+// para calcular `facturacionMensual 12m`, `primeraFactura`, y todo lo
+// relacionado con tendencia histórica. Si no se provee, se usa `rawRows`
+// (archivo de saldos actuales) como antes — lo que genera el bug de
+// "MAXAM aparece como Nuevo" cuando el archivo es corto.
+
+import {
+  fmtM, fmtFull, daysBetween, todayMidnight,
+} from './format.js';
 
 // ──────────────────────────────────────────────────────────────────────
-// Umbrales de clasificación (tuneables)
+// Umbrales de clasificación
 // ──────────────────────────────────────────────────────────────────────
 
-export const UMBRAL_FUGA_DELTA_PCT = -40;    // caída vs periodo anterior
+export const UMBRAL_FUGA_DELTA_PCT = -40;
 export const UMBRAL_FUGA_DIAS_SIN_VENTA = 60;
-export const UMBRAL_DSO_LENTO = 60;          // >60d = lento
-export const UMBRAL_DSO_BUENO = 45;          // ≤45d = bueno
-export const UMBRAL_NUEVO_DIAS = 90;         // primera factura <90d = nuevo
-export const UMBRAL_CARTERA_ESPECIAL_PCT = 0.5; // crítica/total > 50%
-export const UMBRAL_GRANDE_PCT_CARTERA = 0.05; // ≥5% de facturación 3m = "grande"
-
-// ──────────────────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────────────────
+export const UMBRAL_DSO_LENTO = 60;
+export const UMBRAL_DSO_BUENO = 45;
+export const UMBRAL_NUEVO_DIAS = 90;
+export const UMBRAL_CARTERA_ESPECIAL_PCT = 0.5;
+export const UMBRAL_GRANDE_PCT_CARTERA = 0.05;
 
 const pad2 = n => String(n).padStart(2, '0');
 const monthKey = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
@@ -44,26 +41,12 @@ function build12MonthsEnding(hoy) {
 const sum = arr => arr.reduce((a, b) => a + (b || 0), 0);
 const mean = arr => (arr.length ? sum(arr) / arr.length : 0);
 const safeDiv = (a, b) => (b > 0 ? a / b : 0);
-const daysBetween = (a, b) => Math.round((b - a) / (1000 * 60 * 60 * 24));
 
 // ──────────────────────────────────────────────────────────────────────
 // DSO real vía FIFO implícito
 // ──────────────────────────────────────────────────────────────────────
 
 function computeDsoFifo(filas) {
-  // filas: rows de un cliente (ya filtradas), cada una {fecha: Date, tipo, cargo, abono, vencimiento}
-  //
-  // Cargos = facturas + aperturas (excluye filas INGRESO).
-  // Abonos = tipo INGRESO con abono > 0.
-  // Reversiones = tipo INGRESO con cargo > 0 (pagos devueltos).
-  //
-  // Aplico abonos FIFO a cargos en orden cronológico. Cuando un cargo
-  // queda 100% saldado, asumo que la "fecha de pago" es la fecha del
-  // último abono que contribuyó a saldarlo.
-  //
-  // Retorno: { dsoProm, dsoMediana, nFacturasPagadas, diasPagoSamples }
-  //   dso* = días entre fecha emisión y fecha pago implícita.
-
   const cargos = filas
     .filter(r => r.tipo !== 'INGRESO' && r.cargo > 0)
     .sort((a, b) => a.fecha - b.fecha)
@@ -78,16 +61,12 @@ function computeDsoFifo(filas) {
   }
   abonosNetos.sort((a, b) => a.fecha - b.fecha);
 
-  // Aplicar FIFO. Las reversiones (monto negativo) se tratan como
-  // "descontar del pago neto acumulado"; si quedan antes de aplicar
-  // pagos nuevos, se netan con el próximo abono positivo.
   let ptr = 0;
   let saldoAbonoAcum = 0;
 
   for (const ab of abonosNetos) {
     saldoAbonoAcum += ab.monto;
     if (saldoAbonoAcum <= 0) continue;
-    // Aplicar saldoAbonoAcum al cargo ptr
     while (saldoAbonoAcum > 0 && ptr < cargos.length) {
       const c = cargos[ptr];
       const falta = c.cargo - c.pagado;
@@ -107,8 +86,6 @@ function computeDsoFifo(filas) {
   const pagados = cargos.filter(c => c.pagado >= c.cargo - 1 && c.fechaUltimoPago && c.tipo !== 'APERTURA');
   if (pagados.length === 0) return { dsoProm: null, dsoMediana: null, nFacturasPagadas: 0, samples: [] };
 
-  // Ventana: solo facturas emitidas en últimos 18 meses (evita arrastrar DSO histórico)
-  // Y filtrar días negativos (pago antes de emisión = mismatch FIFO con facturas pre-reporte)
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - 18);
 
@@ -124,13 +101,11 @@ function computeDsoFifo(filas) {
 
   if (samples.length === 0) return { dsoProm: null, dsoMediana: null, nFacturasPagadas: 0, samples: [] };
 
-  // DSO promedio ponderado por monto
   const totalMonto = sum(samples.map(s => s.monto));
   const dsoProm = totalMonto > 0
     ? sum(samples.map(s => s.dias * s.monto)) / totalMonto
     : mean(samples.map(s => s.dias));
 
-  // Mediana
   const sorted = [...samples].map(s => s.dias).sort((a, b) => a - b);
   const dsoMediana = sorted.length % 2
     ? sorted[(sorted.length - 1) / 2]
@@ -150,22 +125,24 @@ function clasificarCliente(c, totalFacturacion3m) {
   const participacion = safeDiv(c.facturacionUlt3m, totalFacturacion3m);
   const esGrande = participacion >= UMBRAL_GRANDE_PCT_CARTERA;
 
-  // Señal principal de salud de cobranza: prefiero DSO real si hay pagos
-  // observados; si no, uso vencimiento promedio ponderado de cobrables
-  // (siempre disponible — se calcula de aging).
   const senalDso = c.dsoProm != null ? c.dsoProm : c.diasVencidoPromedio;
   const tieneSenalDso = c.dsoProm != null || c.saldoCobrable > 0;
 
-  // Nuevo primero (excluyente)
-  if (c.diasDesdeUltimaVenta != null && c.primeraFacturaDiasAtras != null && c.primeraFacturaDiasAtras < UMBRAL_NUEVO_DIAS) {
+  // Nuevo: primera factura hace <90 días. Solo válido si el histórico
+  // realmente cubre más que eso. Si el histórico es más corto que 90 días,
+  // no podemos concluir "nuevo" con certeza → dejamos activo.
+  const tieneHistoricoSuficiente = c.historicoCubreDias >= UMBRAL_NUEVO_DIAS;
+
+  if (tieneHistoricoSuficiente &&
+      c.diasDesdeUltimaVenta != null &&
+      c.primeraFacturaDiasAtras != null &&
+      c.primeraFacturaDiasAtras < UMBRAL_NUEVO_DIAS) {
     estado = 'cliente_nuevo';
   }
-  // Cartera especial: saldo mayoritariamente crítico
   else if (c.saldoTotal > 0 && safeDiv(c.saldoCritico, c.saldoTotal) >= UMBRAL_CARTERA_ESPECIAL_PCT) {
     estado = 'cartera_especial';
     alertas.push({ tipo: 'cartera_especial', msg: `${Math.round(safeDiv(c.saldoCritico, c.saldoTotal) * 100)}% del saldo es crítico (+180 días)` });
   }
-  // En fuga: caída fuerte + tiempo sin facturar
   else if (
     (c.deltaPctVs3mAnterior != null && c.deltaPctVs3mAnterior <= UMBRAL_FUGA_DELTA_PCT && c.facturacion3mAnterior > 0) ||
     (c.diasDesdeUltimaVenta != null && c.diasDesdeUltimaVenta > UMBRAL_FUGA_DIAS_SIN_VENTA && c.saldoTotal > 0)
@@ -178,18 +155,15 @@ function clasificarCliente(c, totalFacturacion3m) {
       alertas.push({ tipo: 'inactivo', msg: `${c.diasDesdeUltimaVenta} días sin facturar` });
     }
   }
-  // Grande y lento: facturación importante + señal de DSO pobre
   else if (esGrande && tieneSenalDso && senalDso > UMBRAL_DSO_LENTO) {
     estado = 'grande_lento';
     const src = c.dsoProm != null ? 'DSO real' : 'Vencimiento promedio';
     alertas.push({ tipo: 'dso_lento', msg: `${src} ${Math.round(senalDso)} días (lento para su tamaño)` });
   }
-  // Rentable: activo + cobrables al día + sin facturas críticas
   else if (c.facturacionUlt3m > 0 && c.saldoCritico === 0 && tieneSenalDso && senalDso <= UMBRAL_DSO_BUENO) {
     estado = 'rentable';
   }
 
-  // Alertas adicionales independientes del estado
   if (c.saldoCritico > 0 && estado !== 'cartera_especial') {
     alertas.push({ tipo: 'saldo_critico', msg: `${(c.saldoCritico / 1e6).toFixed(0)}M en facturas +180 días` });
   }
@@ -204,27 +178,37 @@ function clasificarCliente(c, totalFacturacion3m) {
 // Main
 // ──────────────────────────────────────────────────────────────────────
 
-export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
+export function buildClientesMaestro({ rawRows, historicoRows, cobranzas, viajes, hoy }) {
   const HOY = hoy instanceof Date ? hoy : new Date();
   const meses12m = build12MonthsEnding(HOY);
   const meses3m = meses12m.slice(-3);
   const meses3mAnterior = meses12m.slice(-6, -3);
-  const meses6m = meses12m.slice(-6);
 
-  // Agrupar filas crudas por cliente.
-  // En el shape de fileProcessor.js el campo se llama `cliente` (no `ficha`).
-  // Aceptamos ambos por compatibilidad futura.
-  const porCliente = new Map();
-  for (const r of rawRows || []) {
+  // Usamos historicoRows si existe, sino rawRows (saldos actuales como fallback)
+  const fuenteClasificacion = (historicoRows && historicoRows.length > 0) ? historicoRows : (rawRows || []);
+  const usandoHistoricoLargo = historicoRows && historicoRows.length > 0;
+
+  // Calcular la cobertura temporal real del archivo de clasificación
+  let historicoFechaMin = null, historicoFechaMax = null;
+  for (const r of fuenteClasificacion) {
+    if (r.fecha instanceof Date && !isNaN(r.fecha)) {
+      if (!historicoFechaMin || r.fecha < historicoFechaMin) historicoFechaMin = r.fecha;
+      if (!historicoFechaMax || r.fecha > historicoFechaMax) historicoFechaMax = r.fecha;
+    }
+  }
+  const historicoCubreDias = historicoFechaMin ? daysBetween(historicoFechaMin, HOY) : 0;
+
+  // Agrupar filas HISTÓRICAS (clasificación) por cliente
+  const porClienteHist = new Map();
+  for (const r of fuenteClasificacion) {
     const nombre = r?.cliente || r?.ficha;
     if (!nombre || !(r.fecha instanceof Date) || isNaN(r.fecha)) continue;
-    if (!porCliente.has(nombre)) porCliente.set(nombre, []);
-    porCliente.get(nombre).push(r);
+    if (!porClienteHist.has(nombre)) porClienteHist.set(nombre, []);
+    porClienteHist.get(nombre).push(r);
   }
 
-  // Mapa auxiliar: nombre → entry de cobranzas.porCliente.
-  // Necesario porque en fileProcessor.js el índice del objeto es `normName(nombre)`,
-  // no el nombre literal. Reconstruimos el mapa iterando por valores.
+  // Cobranzas.porCliente está indexado por normName(nombre); construimos
+  // un mapa nombre → entry para poder cruzar.
   const cobPorNombre = {};
   if (cobranzas && cobranzas.porCliente) {
     for (const c of Object.values(cobranzas.porCliente)) {
@@ -232,14 +216,21 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
     }
   }
 
+  // Todos los clientes: unión entre clientes del histórico + clientes con saldo
+  const todosClientes = new Set();
+  for (const nombre of porClienteHist.keys()) todosClientes.add(nombre);
+  for (const nombre of Object.keys(cobPorNombre)) todosClientes.add(nombre);
+
   const clientes = [];
   let totalFacturacion3m = 0;
   let totalFacturacion12m = 0;
 
-  for (const [ficha, filas] of porCliente.entries()) {
+  for (const nombre of todosClientes) {
+    const filas = porClienteHist.get(nombre) || [];
     const facturas = filas
-      .filter(r => r.tipo === 'Vta_FVAELECT' && r.cargo > 0)
+      .filter(r => (r.tipo === 'Vta_FVAELECT' || r.tipo === 'Vta_FVEELECTINT') && r.cargo > 0)
       .sort((a, b) => a.fecha - b.fecha);
+
     // Facturación mensual 12m
     const mapMensual = new Map();
     for (const m of meses12m) mapMensual.set(m, 0);
@@ -265,55 +256,48 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
       ? ((facturacionUlt3m - facturacion3mAnterior) / facturacion3mAnterior) * 100
       : null;
 
-    // Días desde última venta + días desde primera venta
     const ultimaFactura = facturas.length ? facturas[facturas.length - 1].fecha : null;
     const primeraFactura = facturas.length ? facturas[0].fecha : null;
     const diasDesdeUltimaVenta = ultimaFactura ? daysBetween(ultimaFactura, HOY) : null;
     const primeraFacturaDiasAtras = primeraFactura ? daysBetween(primeraFactura, HOY) : null;
 
-    // Meses con actividad últimos 12
     const mesesConFacturacion12m = montos12m.filter(m => m > 0).length;
 
-    // Saldos desde cobranzas.porCliente (ya calculados por fileProcessor con FIFO arreglado)
-    const cob = cobPorNombre[ficha] || {};
+    // Saldos vienen del archivo ACTUAL (cobranzas), no del histórico
+    const cob = cobPorNombre[nombre] || {};
     const saldoTotal = cob.saldoPendiente || 0;
     const saldoCobrable = cob.montoCobrables || 0;
     const saldoCritico = cob.montoCriticas || 0;
     const facturasPendientes = cob.facturasPendientes || [];
     const facturasCriticas = cob.facturasCriticas || [];
     const facturasCobrables = cob.facturasCobrables || facturasPendientes.filter(f => !f.critica);
+    const esInternacional = cob.esInternacional || false;
 
-    // Días vencido promedio ponderado (solo cobrables)
     const totalCobrableMonto = sum(facturasCobrables.map(f => f.monto));
     const diasVencidoPromedio = totalCobrableMonto > 0
       ? sum(facturasCobrables.map(f => (f.diasAtraso || 0) * f.monto)) / totalCobrableMonto
       : 0;
 
-    // DSO real vía FIFO.
-    // Primero probamos el `dsoReal` que ya calcula fileProcessor.js (matcheo por folio).
-    // Si viene null (caso habitual con archivos Defontana actuales donde
-    // `Número Doc. Pago` viene vacío), caemos a FIFO implícito.
+    // DSO: primero prueba matcheo por folio (desde cobranzas); fallback a FIFO sobre histórico
     const dsoFifo = computeDsoFifo(filas);
     const dsoPromFinal = cob.dsoReal != null ? cob.dsoReal : dsoFifo.dsoProm;
     const nPagosFinal = cob.dsoMuestras || dsoFifo.nFacturasPagadas;
 
-    // DSO efectivo (fallback si no hay pagos observados)
     const dsoEfectivo = promedioMensual3m > 0
       ? (saldoCobrable / promedioMensual3m) * 30
       : null;
 
-    // Enriquecer con viajes (si hay fuente operacional)
-    const viajesCli = (viajes && viajes.porCliente) ? (viajes.porCliente[ficha] || viajes.porCliente[ficha.trim()] || {}) : {};
+    const viajesCli = (viajes && viajes.porCliente) ? (viajes.porCliente[nombre] || viajes.porCliente[nombre.trim()] || {}) : {};
     const viajesMes = viajesCli.viajesMes ?? null;
     const viajesMesAnterior = viajesCli.viajesMesAnterior ?? null;
     const viajesPromedio6m = viajesCli.viajesPromedio6m ?? null;
-    const viajes12m = viajesCli.viajes12m || null; // array de {mes, n}
+    const viajes12m = viajesCli.viajes12m || null;
 
     const clienteBase = {
-      nombre: ficha,
+      nombre,
       idFicha: cob.rut || (filas.find(r => r.rut) || {}).rut || null,
+      esInternacional,
 
-      // facturación
       facturacionMensual,
       facturacionUlt3m,
       facturacionUlt6m,
@@ -326,13 +310,12 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
       nFacturas12m: facturas.filter(f => f.fecha >= new Date(HOY.getFullYear() - 1, HOY.getMonth(), 1)).length,
       mesesConFacturacion12m,
 
-      // actividad
       ultimaFactura,
       primeraFactura,
       diasDesdeUltimaVenta,
       primeraFacturaDiasAtras,
+      historicoCubreDias, // para que clasificador sepa si confiar en "nuevo"
 
-      // cobranza
       saldoTotal,
       saldoCobrable,
       saldoCritico,
@@ -341,14 +324,12 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
       facturasCobrables,
       diasVencidoPromedio,
 
-      // DSO
       dsoProm: dsoPromFinal,
       dsoMediana: dsoFifo.dsoMediana,
       nPagosObservados: nPagosFinal,
       dsoEfectivo,
       dsoSamples: dsoFifo.samples,
 
-      // viajes (puede ser null)
       viajesMes,
       viajesMesAnterior,
       viajesPromedio6m,
@@ -360,7 +341,6 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
     clientes.push(clienteBase);
   }
 
-  // Clasificar (necesita el total 3m para calcular participación)
   for (const c of clientes) {
     const clasif = clasificarCliente(c, totalFacturacion3m);
     c.estado = clasif.estado;
@@ -369,10 +349,8 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
     c.esGrande = clasif.esGrande;
   }
 
-  // Ordenar por facturación 3m desc (presente comercial)
   clientes.sort((a, b) => b.facturacionUlt3m - a.facturacionUlt3m);
 
-  // Resumen
   const distribucionEstado = clientes.reduce((acc, c) => {
     acc[c.estado] = (acc[c.estado] || 0) + 1;
     return acc;
@@ -386,6 +364,7 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
     saldoCritico: sum(clientes.map(c => c.saldoCritico)),
     nClientesActivos3m: clientes.filter(c => c.facturacionUlt3m > 0).length,
     nClientesConSaldo: clientes.filter(c => c.saldoTotal > 0).length,
+    nInternacionales: clientes.filter(c => c.esInternacional).length,
   };
 
   return {
@@ -395,6 +374,10 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
     meses3m,
     meses3mAnterior,
     distribucionEstado,
+    usandoHistoricoLargo,
+    historicoFechaMin,
+    historicoFechaMax,
+    historicoCubreDias,
     umbrales: {
       UMBRAL_FUGA_DELTA_PCT,
       UMBRAL_FUGA_DIAS_SIN_VENTA,
@@ -408,7 +391,7 @@ export function buildClientesMaestro({ rawRows, cobranzas, viajes, hoy }) {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Metadatos de estado para UI (colores, labels)
+// Metadatos de estado para UI
 // ──────────────────────────────────────────────────────────────────────
 
 export const ESTADO_META = {

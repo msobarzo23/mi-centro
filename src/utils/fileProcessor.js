@@ -5,21 +5,30 @@ import { CLIENTE_PAGO_DIAS } from "../config/sources.js";
 // ══════════════════════════════════════════════════════════════════════
 // PROCESADOR DEL ARCHIVO "Informe por Análisis" de Defontana
 // 100% local en el navegador, nada sale del equipo
+// Soporta cuentas:
+//   1110401001 — Clientes Nacionales
+//   1110401002 — Clientes Internacionales
+// Multiples archivos se concatenan automáticamente (auto-detectando cuenta
+// por el contenido de la columna "Cuenta").
 // ══════════════════════════════════════════════════════════════════════
 
-// Lee el archivo como ArrayBuffer y parsea el xlsx
-export async function processCobranzasFile(file) {
+// Mapa de cuenta → etiqueta humana
+export const CUENTAS_CLIENTES = {
+  "1110401001": "Nacionales",
+  "1110401002": "Internacionales",
+};
+
+// Lee un archivo xlsx individual y retorna sus movimientos + metadata.
+export async function processSingleFile(file) {
   const buffer = await file.arrayBuffer();
   const wb = XLSX.read(buffer, { type: "array", cellDates: false });
   const sheetName = wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
 
-  // Convertir a array de arrays, saltando primeras 6 filas (metadata del informe)
   const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-  if (allRows.length < 8) throw new Error("Archivo vacío o mal formateado");
+  if (allRows.length < 8) throw new Error(`${file.name}: archivo vacío o mal formateado`);
 
-  // La fila 7 (índice 6) contiene los headers
-  // Encontrar la fila con "Cuenta" / "Descripción" para ser robusto
+  // Encontrar fila de headers
   let headerIdx = 6;
   for (let i = 0; i < Math.min(10, allRows.length); i++) {
     const row = allRows[i].map(c => String(c || "").toLowerCase().trim());
@@ -31,7 +40,6 @@ export async function processCobranzasFile(file) {
   const headers = allRows[headerIdx].map(c => String(c || "").trim());
   const dataRows = allRows.slice(headerIdx + 1).filter(r => r && r.some(c => c !== "" && c != null));
 
-  // Convertir a objetos
   const movimientos = dataRows.map(row => {
     const obj = {};
     headers.forEach((h, i) => { obj[h] = row[i]; });
@@ -53,24 +61,92 @@ export async function processCobranzasFile(file) {
     };
   }).filter(m => m.fecha && m.cliente);
 
-  // Extraer fecha del informe desde la fila 1 (si existe)
+  // Auto-detectar cuenta: la más frecuente de las filas
+  const cuentasCount = {};
+  movimientos.forEach(m => { if (m.cuenta) cuentasCount[m.cuenta] = (cuentasCount[m.cuenta] || 0) + 1; });
+  const cuenta = Object.entries(cuentasCount).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+  // Extraer fecha del informe desde metadata superior
   let fechaInforme = null;
-  for (let i = 0; i < Math.min(6, allRows.length); i++) {
-    const row = allRows[i];
+  for (let i = 0; i < headerIdx; i++) {
+    const row = allRows[i] || [];
     for (const cell of row) {
       const s = String(cell || "");
-      const m = s.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
+      const m = s.match(/Fecha:\s*(\d{1,2}\/\d{1,2}\/\d{4})/i) || s.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
       if (m) { fechaInforme = parseDate(m[1]); break; }
     }
     if (fechaInforme) break;
   }
   if (!fechaInforme) fechaInforme = todayMidnight();
 
+  // Rango temporal real de los datos
+  const fechas = movimientos.map(m => m.fecha).filter(Boolean);
+  const fechaMin = fechas.length ? new Date(Math.min(...fechas.map(f => f.getTime()))) : null;
+  const fechaMax = fechas.length ? new Date(Math.max(...fechas.map(f => f.getTime()))) : null;
+
   return {
+    nombre: file.name,
     movimientos,
     fechaInforme,
+    cuenta,
+    cuentaLabel: CUENTAS_CLIENTES[cuenta] || cuenta || "Desconocida",
     totalMovimientos: movimientos.length,
+    fechaMin, fechaMax,
   };
+}
+
+// Procesa múltiples archivos y los combina en un solo resultado.
+// Las cuentas duplicadas se rechazan (no tiene sentido subir 2 veces el nacional).
+export async function processFiles(files) {
+  const fileArr = Array.from(files);
+  if (fileArr.length === 0) throw new Error("No hay archivos que procesar");
+
+  const results = await Promise.all(fileArr.map(processSingleFile));
+
+  // Validar duplicados de cuenta
+  const cuentasVistas = new Set();
+  for (const r of results) {
+    if (r.cuenta && cuentasVistas.has(r.cuenta)) {
+      throw new Error(`Subiste dos archivos de la cuenta ${r.cuentaLabel} (${r.cuenta}). Combina solo nacional + internacional.`);
+    }
+    if (r.cuenta) cuentasVistas.add(r.cuenta);
+  }
+
+  const allMovs = [];
+  let fechaInforme = null;
+  let fechaMin = null, fechaMax = null;
+  const archivos = [];
+
+  for (const r of results) {
+    allMovs.push(...r.movimientos);
+    archivos.push({
+      nombre: r.nombre,
+      cuenta: r.cuenta,
+      cuentaLabel: r.cuentaLabel,
+      totalMovimientos: r.totalMovimientos,
+      fechaMin: r.fechaMin,
+      fechaMax: r.fechaMax,
+      fechaInforme: r.fechaInforme,
+    });
+    if (!fechaInforme || (r.fechaInforme && r.fechaInforme > fechaInforme)) fechaInforme = r.fechaInforme;
+    if (r.fechaMin && (!fechaMin || r.fechaMin < fechaMin)) fechaMin = r.fechaMin;
+    if (r.fechaMax && (!fechaMax || r.fechaMax > fechaMax)) fechaMax = r.fechaMax;
+  }
+
+  return {
+    movimientos: allMovs,
+    fechaInforme,
+    fechaMin,
+    fechaMax,
+    totalMovimientos: allMovs.length,
+    archivos,
+    cuentasDetectadas: Array.from(cuentasVistas),
+  };
+}
+
+// Retrocompatibilidad: si alguna parte del app llamaba processCobranzasFile con un solo file
+export async function processCobranzasFile(file) {
+  return processFiles([file]);
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -81,18 +157,10 @@ export async function processCobranzasFile(file) {
 // cobranza especial y NO cuenta como ingreso esperado automático.
 export const UMBRAL_FACTURA_CRITICA_DIAS = 180;
 
-// Genera objeto por cliente con:
-//   - facturas pendientes (no cobradas completamente) vía FIFO real
-//   - pagos ya recibidos
-//   - DSO real (si hay histórico de pagos)
-//   - aging buckets incluyendo "críticas" (>180 días vencidas)
-//
-// Nota importante sobre el FIFO:
-// El archivo Defontana NO trae un "saldo por factura" confiable — la columna `Saldo`
-// es trivialmente `Cargo - Abono` de esa fila. Entonces distribuimos el saldo neto
-// del cliente entre sus cargos (facturas + APERTURAs) asumiendo FIFO: los pagos
-// se aplican primero a los cargos más antiguos. Esto deja las facturas más recientes
-// como pendientes, que es el comportamiento correcto para cobranza.
+// Genera objeto por cliente con facturas pendientes vía FIFO, aging y DSO real.
+// Se alimenta SOLO del archivo de "saldos actuales" (el corto con aperturas del
+// año). El histórico largo no se usa aquí porque le faltan las aperturas pre-período
+// y daría saldos erróneos.
 export function computeCobranzas(procesado, todayRef = null) {
   if (!procesado || !procesado.movimientos) return null;
   const today = todayRef || procesado.fechaInforme || todayMidnight();
@@ -106,6 +174,7 @@ export function computeCobranzas(procesado, todayRef = null) {
       porCliente[key] = {
         nombre: m.cliente,
         rut: m.rut,
+        cuentas: new Set(),
         movimientos: [],
         totalCargo: 0,
         totalAbono: 0,
@@ -114,15 +183,16 @@ export function computeCobranzas(procesado, todayRef = null) {
     porCliente[key].movimientos.push(m);
     porCliente[key].totalCargo += m.cargo;
     porCliente[key].totalAbono += m.abono;
+    if (m.cuenta) porCliente[key].cuentas.add(m.cuenta);
   });
 
   // Para cada cliente, derivar estado de facturas
   Object.values(porCliente).forEach(c => {
     c.saldoPendiente = c.totalCargo - c.totalAbono;
+    c.esInternacional = c.cuentas.has("1110401002");
+    c.cuentas = Array.from(c.cuentas);
 
     // CARGOS = cualquier fila con cargo > 0 y tipo != INGRESO (incluye Vta_* y APERTURA)
-    //   Las APERTURAs representan saldos iniciales al migrar al ERP — son "facturas"
-    //   históricas que siguen vigentes en el libro mayor.
     const cargos = c.movimientos
       .filter(m => m.cargo > 0 && m.tipo !== "INGRESO")
       .sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
@@ -132,8 +202,7 @@ export function computeCobranzas(procesado, todayRef = null) {
     const cargosIngreso = c.movimientos.filter(m => m.tipo === "INGRESO" && m.cargo > 0).reduce((s, m) => s + m.cargo, 0);
     const abonosNetos = abonosTotal - cargosIngreso;
 
-    // ─── Cálculo de DSO real (matchea pagos con facturas) ───
-    // Mantiene lógica anterior: matcheo por numeroDocPago
+    // ─── DSO real vía matcheo por numeroDocPago ───
     const pagos = c.movimientos.filter(m => m.abono > 0);
     const dsoSamples = [];
     pagos.forEach(pago => {
@@ -167,16 +236,16 @@ export function computeCobranzas(procesado, todayRef = null) {
 
     // ─── FIFO: aplicar abonosNetos a cargos ordenados ascendente por fecha ───
     c.facturasPendientes = [];
-    c.facturasCriticas = [];  // >180 días vencidas (no cuentan para ingresos esperados)
-    c.facturasCobrables = []; // ≤180 días o por vencer (sí cuentan)
+    c.facturasCriticas = [];
+    c.facturasCobrables = [];
 
-    if (c.saldoPendiente <= 0.01) return; // sin deuda neta, no hay pendientes
+    if (c.saldoPendiente <= 0.01) return;
 
     let rem = Math.max(0, abonosNetos);
     for (const f of cargos) {
       if (rem >= f.cargo) {
         rem -= f.cargo;
-        continue; // factura completamente pagada
+        continue;
       }
       const saldoF = f.cargo - rem;
       rem = 0;
@@ -192,6 +261,7 @@ export function computeCobranzas(procesado, todayRef = null) {
         documento: f.documento,
         diasAtraso,
         tipo: f.tipo,
+        cuenta: f.cuenta,
         esApertura: f.tipo === "APERTURA",
         critica,
       };
@@ -200,7 +270,6 @@ export function computeCobranzas(procesado, todayRef = null) {
       else c.facturasCobrables.push(fact);
     }
 
-    // Métricas por cliente para dashboards
     c.montoCriticas = c.facturasCriticas.reduce((s, f) => s + f.monto, 0);
     c.montoCobrables = c.facturasCobrables.reduce((s, f) => s + f.monto, 0);
   });
@@ -217,7 +286,7 @@ export function computeCobranzas(procesado, todayRef = null) {
     vencidas_31_60: { count: 0, monto: 0, facturas: [] },
     vencidas_61_90: { count: 0, monto: 0, facturas: [] },
     vencidas_91_180: { count: 0, monto: 0, facturas: [] },
-    vencidas_critica: { count: 0, monto: 0, facturas: [] }, // > 180 días (cobranza especial)
+    vencidas_critica: { count: 0, monto: 0, facturas: [] },
   };
 
   todasFacturasPendientes.forEach(f => {
@@ -235,13 +304,11 @@ export function computeCobranzas(procesado, todayRef = null) {
     aging[bucket].facturas.push(f);
   });
 
-  const totalPendiente = Object.values(porCliente).reduce((s, c) => s + c.saldoPendiente, 0);
-  // Total cobrable = todo lo pendiente excluyendo las facturas críticas (>180 días)
+  const totalPendiente = Object.values(porCliente).reduce((s, c) => s + Math.max(c.saldoPendiente, 0), 0);
   const totalCobrable = aging.porVencer.monto + aging.vencidas_0_30.monto +
                         aging.vencidas_31_60.monto + aging.vencidas_61_90.monto +
                         aging.vencidas_91_180.monto;
   const totalCritico = aging.vencidas_critica.monto;
-  // Total vencido = cualquier factura con días de atraso > 0 (incluye críticas)
   const totalVencido = aging.vencidas_0_30.monto + aging.vencidas_31_60.monto +
                        aging.vencidas_61_90.monto + aging.vencidas_91_180.monto +
                        aging.vencidas_critica.monto;
@@ -260,18 +327,27 @@ export function computeCobranzas(procesado, todayRef = null) {
   });
   const dsoGlobal = dsoGlobalWeight > 0 ? dsoGlobalSum / dsoGlobalWeight : null;
 
+  // Separar totales por cuenta para dashboards
+  const totalPorCuenta = { nacional: 0, internacional: 0 };
+  clientesArray.forEach(c => {
+    if (c.esInternacional) totalPorCuenta.internacional += c.saldoPendiente;
+    else totalPorCuenta.nacional += c.saldoPendiente;
+  });
+
   return {
     porCliente,
     clientesArray,
     aging,
     totalPendiente,
-    totalCobrable,    // NUEVO: excluye facturas >180 días
-    totalCritico,     // NUEVO: solo facturas >180 días (gestión especial)
-    totalVencido,     // NUEVO: cualquier factura con atraso > 0
+    totalCobrable,
+    totalCritico,
+    totalVencido,
+    totalPorCuenta,
     dsoGlobal,
     totalFacturasPendientes: todasFacturasPendientes.length,
     fechaInforme: today,
     totalMovimientos: procesado.totalMovimientos,
+    archivos: procesado.archivos || [],
   };
 }
 
@@ -287,15 +363,13 @@ export function estimarVencimiento(fechaFactura, nombreCliente) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// PROYECCIÓN DE COBRANZA — cuánto voy a cobrar cada semana los próx 90 días
-// IMPORTANTE: Excluye facturas "críticas" (>180 días vencidas). Esas requieren
-// cobranza especial y no son ingresos esperados automáticos.
+// PROYECCIÓN DE COBRANZA
 // ══════════════════════════════════════════════════════════════════════
 export function buildCobranzaProyectada(cobranzas, today) {
-  if (!cobranzas) return [];
+  if (!cobranzas) return { buckets: [], vencidas: { monto: 0, facturas: [] }, criticas: { monto: 0, facturas: [] } };
   const ref = today || todayMidnight();
-  const buckets = []; // {semana, inicio, fin, facturas[], monto}
-  for (let w = 0; w < 13; w++) { // 13 semanas ≈ 90 días
+  const buckets = [];
+  for (let w = 0; w < 13; w++) {
     const inicio = new Date(ref);
     inicio.setDate(inicio.getDate() + w * 7);
     inicio.setHours(0, 0, 0, 0);
@@ -304,11 +378,9 @@ export function buildCobranzaProyectada(cobranzas, today) {
     fin.setHours(23, 59, 59, 999);
     buckets.push({ semana: w, inicio, fin, facturas: [], monto: 0, label: `${inicio.getDate()}/${inicio.getMonth()+1} — ${fin.getDate()}/${fin.getMonth()+1}` });
   }
-  // Distribuir cada factura pendiente COBRABLE en la semana correspondiente a su vencimiento
-  // Críticas (>180 días) NO se incluyen — son cobranza especial.
   Object.values(cobranzas.porCliente || {}).forEach(c => {
     c.facturasPendientes.forEach(f => {
-      if (f.critica) return; // skip: no es ingreso esperado automático
+      if (f.critica) return;
       const venc = f.vencimiento;
       if (!venc) return;
       for (const b of buckets) {
@@ -320,10 +392,7 @@ export function buildCobranzaProyectada(cobranzas, today) {
       }
     });
   });
-  // Vencidas antes de hoy (pero no críticas) → bucket "ya vencidas, gestionables"
   const vencidas = { monto: 0, facturas: [] };
-  // Críticas separadas → NO cuentan como ingreso esperado, pero las devolvemos
-  // para mostrar el saldo aparte en dashboards
   const criticas = { monto: 0, facturas: [] };
   Object.values(cobranzas.porCliente || {}).forEach(c => {
     c.facturasPendientes.forEach(f => {
