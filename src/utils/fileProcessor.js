@@ -3,19 +3,25 @@ import { parseDate, parseNum, normName, daysBetween, todayMidnight } from "./hel
 import { CLIENTE_PAGO_DIAS } from "../config/sources.js";
 
 // ══════════════════════════════════════════════════════════════════════
-// fileProcessor v1.4.0 — fix matching INGRESO por numeroDocPago
+// fileProcessor v1.5.0 — algoritmo HÍBRIDO
 //
-// BUG ANTERIOR (v1.3.x): grouping de movimientos usaba m.numeroDoc para
-// TODOS los tipos. En Defontana, los rows INGRESO (pagos) tienen su propio
-// número de recibo en col N (Número Doc.) y el folio de la factura pagada
-// en col O (Número Doc. Pago). Al agrupar por col N, los pagos nunca se
-// emparejaban con sus facturas → todas las facturas quedaban "pendientes"
-// → aging total > saldo real (169% en el caso reportado).
+// CAUSA DEL BUG (169% vencido):
+//   Defontana asigna col N = "1" o "2" a las filas APERTURA (placeholder
+//   genérico, no el folio original). Los abono-APERTURA (créditos de pagos
+//   anteriores al período) también caen en ese bucket "1"/"2". El algoritmo
+//   v1.3/1.4 agrupaba todo por col N → folio "1" acumulaba $2.7B de cargo
+//   y solo $590M de abono (SQM Industrial) → creaba una "factura" ficticia
+//   de $2.1B → aging total >> saldo real.
 //
-// FIX: para rows de tipo INGRESO, usar m.numeroDocPago como clave de
-// agrupación (con fallback a m.numeroDoc si está vacío).
+// FIX — TRACK 1 (Vta_): folio-matching por col N.
+//   Las Vta_FVAELECT / Vta_FVEELECTINT tienen folio real en col N.
+//   Los INGRESO que las pagan comparten ese folio → matching exacto → DSO.
+//
+// FIX — TRACK 2 (APERTURA): FIFO cronológico clásico.
+//   Los cargos que NO son Vta_ (APERTURAs, etc.) se ordenan por fecha y
+//   los créditos residuales se aplican de más antiguo a más nuevo.
 // ══════════════════════════════════════════════════════════════════════
-export const FILE_PROCESSOR_VERSION = "1.4.0";
+export const FILE_PROCESSOR_VERSION = "1.5.0";
 if (typeof window !== "undefined") {
   console.log("[mi-centro] fileProcessor v" + FILE_PROCESSOR_VERSION + " cargado");
 }
@@ -38,8 +44,7 @@ export async function processSingleFile(file) {
   for (let i = 0; i < Math.min(10, allRows.length); i++) {
     const row = allRows[i].map(c => String(c || "").toLowerCase().trim());
     if (row.some(c => c === "cuenta") && row.some(c => c.includes("descripción") || c === "descripcion")) {
-      headerIdx = i;
-      break;
+      headerIdx = i; break;
     }
   }
   const headers = allRows[headerIdx].map(c => String(c || "").trim());
@@ -87,71 +92,41 @@ export async function processSingleFile(file) {
   const fechaMax = fechas.length ? new Date(Math.max(...fechas.map(f => f.getTime()))) : null;
 
   return {
-    nombre: file.name,
-    movimientos,
-    fechaInforme,
-    cuenta,
+    nombre: file.name, movimientos, fechaInforme, cuenta,
     cuentaLabel: CUENTAS_CLIENTES[cuenta] || cuenta || "Desconocida",
-    totalMovimientos: movimientos.length,
-    fechaMin, fechaMax,
+    totalMovimientos: movimientos.length, fechaMin, fechaMax,
   };
 }
 
 export async function processFiles(files) {
   const fileArr = Array.from(files);
   if (fileArr.length === 0) throw new Error("No hay archivos que procesar");
-
   const results = await Promise.all(fileArr.map(processSingleFile));
 
   const cuentasVistas = new Set();
   for (const r of results) {
-    if (r.cuenta && cuentasVistas.has(r.cuenta)) {
-      throw new Error(`Subiste dos archivos de la cuenta ${r.cuentaLabel} (${r.cuenta}). Combina solo nacional + internacional.`);
-    }
+    if (r.cuenta && cuentasVistas.has(r.cuenta))
+      throw new Error(`Subiste dos archivos de la cuenta ${r.cuentaLabel} (${r.cuenta}).`);
     if (r.cuenta) cuentasVistas.add(r.cuenta);
   }
 
   const allMovs = [];
-  let fechaInforme = null;
-  let fechaMin = null, fechaMax = null;
+  let fechaInforme = null, fechaMin = null, fechaMax = null;
   const archivos = [];
-
   for (const r of results) {
     allMovs.push(...r.movimientos);
-    archivos.push({
-      nombre: r.nombre,
-      cuenta: r.cuenta,
-      cuentaLabel: r.cuentaLabel,
-      totalMovimientos: r.totalMovimientos,
-      fechaMin: r.fechaMin,
-      fechaMax: r.fechaMax,
-      fechaInforme: r.fechaInforme,
-    });
+    archivos.push({ nombre: r.nombre, cuenta: r.cuenta, cuentaLabel: r.cuentaLabel, totalMovimientos: r.totalMovimientos, fechaMin: r.fechaMin, fechaMax: r.fechaMax, fechaInforme: r.fechaInforme });
     if (!fechaInforme || (r.fechaInforme && r.fechaInforme > fechaInforme)) fechaInforme = r.fechaInforme;
     if (r.fechaMin && (!fechaMin || r.fechaMin < fechaMin)) fechaMin = r.fechaMin;
     if (r.fechaMax && (!fechaMax || r.fechaMax > fechaMax)) fechaMax = r.fechaMax;
   }
-
-  return {
-    movimientos: allMovs,
-    fechaInforme,
-    fechaMin,
-    fechaMax,
-    totalMovimientos: allMovs.length,
-    archivos,
-    cuentasDetectadas: Array.from(cuentasVistas),
-  };
+  return { movimientos: allMovs, fechaInforme, fechaMin, fechaMax, totalMovimientos: allMovs.length, archivos, cuentasDetectadas: Array.from(cuentasVistas) };
 }
 
-export async function processCobranzasFile(file) {
-  return processFiles([file]);
-}
+export async function processCobranzasFile(file) { return processFiles([file]); }
 
 export const UMBRAL_FACTURA_CRITICA_DIAS = 180;
 
-// ══════════════════════════════════════════════════════════════════════
-// Normaliza folio — elimina decimales espurios (.0)
-// ══════════════════════════════════════════════════════════════════════
 function normFolio(v) {
   if (v == null || v === "") return "";
   const s = String(v).trim();
@@ -160,38 +135,19 @@ function normFolio(v) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// Devuelve la clave de agrupación para un movimiento.
-//
-// FIX v1.4.0: las filas INGRESO (pagos y reversiones) referencian su
-// factura en col O (numeroDocPago), no en col N (numeroDoc). Usamos esa
-// columna para que el pago quede en el mismo bucket que su factura.
-// Si numeroDocPago está vacío caemos a numeroDoc como último recurso.
+// COMPUTE COBRANZAS — algoritmo híbrido v1.5.0
 // ══════════════════════════════════════════════════════════════════════
-function getFolioKey(m) {
-  if (m.tipo === "INGRESO") {
-    const byPago = normFolio(m.numeroDocPago);
-    if (byPago) return byPago;
-  }
-  return normFolio(m.numeroDoc);
-}
-
 export function computeCobranzas(procesado, todayRef = null) {
   if (!procesado || !procesado.movimientos) return null;
   const today = todayRef || procesado.fechaInforme || todayMidnight();
   const movs = procesado.movimientos;
 
+  // Agrupar por cliente
   const porCliente = {};
   movs.forEach(m => {
     const key = normName(m.cliente);
     if (!porCliente[key]) {
-      porCliente[key] = {
-        nombre: m.cliente,
-        rut: m.rut,
-        cuentas: new Set(),
-        movimientos: [],
-        totalCargo: 0,
-        totalAbono: 0,
-      };
+      porCliente[key] = { nombre: m.cliente, rut: m.rut, cuentas: new Set(), movimientos: [], totalCargo: 0, totalAbono: 0 };
     }
     porCliente[key].movimientos.push(m);
     porCliente[key].totalCargo += m.cargo;
@@ -204,58 +160,59 @@ export function computeCobranzas(procesado, todayRef = null) {
     c.esInternacional = c.cuentas.has("1110401002");
     c.cuentas = Array.from(c.cuentas);
 
-    // ─── Agrupar por folio usando la clave correcta ───────────────────
-    // FIX v1.4.0: INGRESO rows → clave = numeroDocPago (folio de la factura pagada)
-    const porFolio = new Map();
-    const sinFolio = [];
-    c.movimientos.forEach(m => {
-      const folio = getFolioKey(m);
-      if (!folio) {
-        sinFolio.push(m);
-        return;
+    const movs = c.movimientos;
+
+    // ── Identificar folios Vta_ (folios reales) ──────────────────────
+    const vtaFolios = new Set();
+    movs.forEach(m => {
+      if (m.cargo > 0 && m.tipo !== "INGRESO" && m.tipo !== "APERTURA") {
+        const f = normFolio(m.numeroDoc);
+        if (f) vtaFolios.add(f);
       }
-      if (!porFolio.has(folio)) porFolio.set(folio, []);
-      porFolio.get(folio).push(m);
     });
 
+    // ── Separar tracks ───────────────────────────────────────────────
+    const vtaMovs   = movs.filter(m => vtaFolios.has(normFolio(m.numeroDoc)));
+    const apertMovs = movs.filter(m => !vtaFolios.has(normFolio(m.numeroDoc)));
+
     c.facturasPendientes = [];
-    c.facturasCriticas = [];
-    c.facturasCobrables = [];
+    c.facturasCriticas   = [];
+    c.facturasCobrables  = [];
     const dsoSamples = [];
-    let facturasCount = 0;
-    let pagosCount = 0;
+    let facturasCount = 0, pagosCount = 0;
 
-    porFolio.forEach((rows, folio) => {
-      const facturas = rows.filter(r => r.cargo > 0 && r.tipo !== "INGRESO").sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
+    // ═══════════════════════════════════════════════════════════════
+    // TRACK 1 — Vta_: folio-matching por col N
+    // ═══════════════════════════════════════════════════════════════
+    const porFolioVta = new Map();
+    vtaMovs.forEach(m => {
+      const f = normFolio(m.numeroDoc);
+      if (!f) return;
+      if (!porFolioVta.has(f)) porFolioVta.set(f, []);
+      porFolioVta.get(f).push(m);
+    });
+
+    porFolioVta.forEach((rows, folio) => {
+      const facturas    = rows.filter(r => r.cargo > 0 && r.tipo !== "INGRESO").sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
       const reversiones = rows.filter(r => r.cargo > 0 && r.tipo === "INGRESO");
-      const abonos = rows.filter(r => r.abono > 0).sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
+      const abonos      = rows.filter(r => r.abono > 0).sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
+      if (!facturas.length) return;
 
-      if (facturas.length === 0) return;
-
-      const totalFacturas = facturas.reduce((s, r) => s + r.cargo, 0);
-      const totalReversiones = reversiones.reduce((s, r) => s + r.cargo, 0);
-      const totalAbonos = abonos.reduce((s, r) => s + r.abono, 0);
-      const abonosNetos = totalAbonos - totalReversiones;
-      const saldoFolio = totalFacturas - abonosNetos;
-
+      const totalF    = facturas.reduce((s, r) => s + r.cargo, 0);
+      const totalRev  = reversiones.reduce((s, r) => s + r.cargo, 0);
+      const totalAb   = abonos.reduce((s, r) => s + r.abono, 0);
+      const abNetos   = totalAb - totalRev;
+      const saldo     = totalF - abNetos;
       const primerCargo = facturas[0];
       if (primerCargo.tipo !== "APERTURA") facturasCount++;
       pagosCount += abonos.length;
 
-      if (saldoFolio <= 0.01) {
+      if (saldo <= 0.01) {
         if (abonos.length > 0 && primerCargo.fecha && primerCargo.tipo !== "APERTURA") {
-          const ultimoAbono = abonos[abonos.length - 1];
-          const dias = daysBetween(primerCargo.fecha, ultimoAbono.fecha);
-          if (dias !== null && dias >= 0 && dias < 730) {
-            dsoSamples.push({
-              dias,
-              monto: totalFacturas,
-              folio,
-              fechaEmision: primerCargo.fecha,
-              fechaPago: ultimoAbono.fecha,
-              pagosParciales: abonos.length,
-            });
-          }
+          const ult = abonos[abonos.length - 1];
+          const dias = daysBetween(primerCargo.fecha, ult.fecha);
+          if (dias !== null && dias >= 0 && dias < 730)
+            dsoSamples.push({ dias, monto: totalF, folio, fechaEmision: primerCargo.fecha, fechaPago: ult.fecha });
         }
         return;
       }
@@ -263,116 +220,98 @@ export function computeCobranzas(procesado, todayRef = null) {
       const venc = primerCargo.vencimiento || estimarVencimiento(primerCargo.fecha, c.nombre);
       const diasAtraso = venc ? daysBetween(venc, today) : null;
       const critica = diasAtraso != null && diasAtraso > UMBRAL_FACTURA_CRITICA_DIAS;
-
       const fact = {
-        folio,
-        fecha: primerCargo.fecha,
-        vencimiento: venc,
-        monto: saldoFolio,
-        montoOriginal: totalFacturas,
-        montoPagado: abonosNetos,
-        documento: primerCargo.documento,
-        diasAtraso,
-        tipo: primerCargo.tipo,
-        cuenta: primerCargo.cuenta,
-        esApertura: primerCargo.tipo === "APERTURA",
-        critica,
-        pagosParciales: abonos.length,
-        parcial: abonos.length > 0,
+        folio, fecha: primerCargo.fecha, vencimiento: venc, monto: saldo,
+        montoOriginal: totalF, montoPagado: abNetos, documento: primerCargo.documento,
+        diasAtraso, tipo: primerCargo.tipo, cuenta: primerCargo.cuenta,
+        esApertura: false, critica, pagosParciales: abonos.length, parcial: abonos.length > 0,
       };
       c.facturasPendientes.push(fact);
-      if (critica) c.facturasCriticas.push(fact);
-      else c.facturasCobrables.push(fact);
+      if (critica) c.facturasCriticas.push(fact); else c.facturasCobrables.push(fact);
     });
 
-    // Fallback FIFO para movimientos sin folio asignable
-    if (sinFolio.length > 0) {
-      const cargosSF = sinFolio.filter(m => m.cargo > 0).sort((a, b) => (a.fecha || 0) - (b.fecha || 0));
-      const abonosSF = sinFolio.filter(m => m.abono > 0);
-      let rem = abonosSF.reduce((s, m) => s + m.abono, 0) - sinFolio.filter(m => m.cargo > 0 && m.tipo === "INGRESO").reduce((s, m) => s + m.cargo, 0);
-      for (const f of cargosSF) {
-        if (f.tipo === "INGRESO") continue;
-        if (rem >= f.cargo) { rem -= f.cargo; continue; }
-        const saldoF = f.cargo - rem;
-        rem = 0;
-        const venc = f.vencimiento || estimarVencimiento(f.fecha, c.nombre);
-        const diasAtraso = venc ? daysBetween(venc, today) : null;
-        const critica = diasAtraso != null && diasAtraso > UMBRAL_FACTURA_CRITICA_DIAS;
-        const fact = {
-          folio: f.numero || "—",
-          fecha: f.fecha, vencimiento: venc,
-          monto: saldoF, montoOriginal: f.cargo, montoPagado: f.cargo - saldoF,
-          documento: f.documento, diasAtraso, tipo: f.tipo, cuenta: f.cuenta,
-          esApertura: f.tipo === "APERTURA", critica, pagosParciales: 0, parcial: false,
-          sinFolio: true,
-        };
-        c.facturasPendientes.push(fact);
-        if (critica) c.facturasCriticas.push(fact);
-        else c.facturasCobrables.push(fact);
-        facturasCount++;
-      }
+    // ═══════════════════════════════════════════════════════════════
+    // TRACK 2 — APERTURA: FIFO cronológico
+    // ═══════════════════════════════════════════════════════════════
+    // Cargos: todos los no-INGRESO del track APERTURA, ordenados fecha asc
+    const apertCargos = apertMovs
+      .filter(m => m.cargo > 0 && m.tipo !== "INGRESO")
+      .sort((a, b) => (a.fecha || new Date(0)) - (b.fecha || new Date(0)));
+
+    // Créditos: abonos menos reversiones de INGRESO en este track
+    const abonosNetos2 =
+      apertMovs.filter(m => m.abono > 0).reduce((s, m) => s + m.abono, 0)
+      - apertMovs.filter(m => m.cargo > 0 && m.tipo === "INGRESO").reduce((s, m) => s + m.cargo, 0);
+
+    let rem = abonosNetos2;
+    for (const r of apertCargos) {
+      if (rem >= r.cargo) { rem -= r.cargo; pagosCount++; continue; }
+      const saldoF = r.cargo - rem;
+      rem = 0;
+      if (saldoF < 1) continue;
+      if (r.tipo !== "APERTURA") facturasCount++;
+
+      const venc = r.vencimiento || estimarVencimiento(r.fecha, c.nombre);
+      const diasAtraso = venc ? daysBetween(venc, today) : null;
+      const critica = diasAtraso != null && diasAtraso > UMBRAL_FACTURA_CRITICA_DIAS;
+      const fact = {
+        folio: normFolio(r.numeroDoc) || String(r.numero || "") || "—",
+        fecha: r.fecha, vencimiento: venc, monto: saldoF,
+        montoOriginal: r.cargo, montoPagado: r.cargo - saldoF,
+        documento: r.documento, diasAtraso, tipo: r.tipo, cuenta: r.cuenta,
+        esApertura: r.tipo === "APERTURA", critica, pagosParciales: 0, parcial: rem > 0,
+      };
+      c.facturasPendientes.push(fact);
+      if (critica) c.facturasCriticas.push(fact); else c.facturasCobrables.push(fact);
     }
 
-    c.facturasCount = facturasCount;
-    c.pagosCount = pagosCount;
+    c.facturasCount        = facturasCount;
+    c.pagosCount           = pagosCount;
+    c.montoCriticas        = c.facturasCriticas.reduce((s, f) => s + f.monto, 0);
+    c.montoCobrables       = c.facturasCobrables.reduce((s, f) => s + f.monto, 0);
+    c.saldoPendienteFolios = c.facturasPendientes.reduce((s, f) => s + f.monto, 0);
 
     if (dsoSamples.length > 0) {
-      const totMonto = dsoSamples.reduce((s, x) => s + x.monto, 0);
-      c.dsoReal = totMonto > 0
-        ? dsoSamples.reduce((s, x) => s + x.dias * x.monto, 0) / totMonto
-        : null;
+      const totM = dsoSamples.reduce((s, x) => s + x.monto, 0);
+      c.dsoReal    = totM > 0 ? dsoSamples.reduce((s, x) => s + x.dias * x.monto, 0) / totM : null;
       c.dsoMuestras = dsoSamples.length;
-      c.dsoSamples = dsoSamples;
-    } else {
-      c.dsoReal = null;
-      c.dsoMuestras = 0;
-      c.dsoSamples = [];
-    }
-
-    const saldoPorFolios = c.facturasPendientes.reduce((s, f) => s + f.monto, 0);
-    c.saldoPendienteFolios = saldoPorFolios;
-    c.montoCriticas = c.facturasCriticas.reduce((s, f) => s + f.monto, 0);
-    c.montoCobrables = c.facturasCobrables.reduce((s, f) => s + f.monto, 0);
+      c.dsoSamples  = dsoSamples;
+    } else { c.dsoReal = null; c.dsoMuestras = 0; c.dsoSamples = []; }
   });
 
-  // Aging buckets globales
-  const todasFacturasPendientes = [];
+  // ── Aging global ──────────────────────────────────────────────────
+  const todasFacturas = [];
   Object.values(porCliente).forEach(c => {
-    c.facturasPendientes.forEach(f => todasFacturasPendientes.push({ ...f, cliente: c.nombre, clienteKey: normName(c.nombre), rut: c.rut }));
+    c.facturasPendientes.forEach(f => todasFacturas.push({ ...f, cliente: c.nombre, clienteKey: normName(c.nombre), rut: c.rut }));
   });
 
   const aging = {
-    porVencer: { count: 0, monto: 0, facturas: [] },
-    vencidas_0_30: { count: 0, monto: 0, facturas: [] },
-    vencidas_31_60: { count: 0, monto: 0, facturas: [] },
-    vencidas_61_90: { count: 0, monto: 0, facturas: [] },
-    vencidas_91_180: { count: 0, monto: 0, facturas: [] },
+    porVencer:        { count: 0, monto: 0, facturas: [] },
+    vencidas_0_30:    { count: 0, monto: 0, facturas: [] },
+    vencidas_31_60:   { count: 0, monto: 0, facturas: [] },
+    vencidas_61_90:   { count: 0, monto: 0, facturas: [] },
+    vencidas_91_180:  { count: 0, monto: 0, facturas: [] },
     vencidas_critica: { count: 0, monto: 0, facturas: [] },
   };
-
-  todasFacturasPendientes.forEach(f => {
+  todasFacturas.forEach(f => {
     const d = f.diasAtraso;
-    let bucket;
-    if (d == null) bucket = "porVencer";
-    else if (d <= 0) bucket = "porVencer";
-    else if (d <= 30) bucket = "vencidas_0_30";
-    else if (d <= 60) bucket = "vencidas_31_60";
-    else if (d <= 90) bucket = "vencidas_61_90";
-    else if (d <= UMBRAL_FACTURA_CRITICA_DIAS) bucket = "vencidas_91_180";
-    else bucket = "vencidas_critica";
-    aging[bucket].count++;
-    aging[bucket].monto += f.monto;
-    aging[bucket].facturas.push(f);
+    const b = (d == null || d <= 0) ? "porVencer"
+            : d <= 30  ? "vencidas_0_30"
+            : d <= 60  ? "vencidas_31_60"
+            : d <= 90  ? "vencidas_61_90"
+            : d <= UMBRAL_FACTURA_CRITICA_DIAS ? "vencidas_91_180"
+            : "vencidas_critica";
+    aging[b].count++;
+    aging[b].monto += f.monto;
+    aging[b].facturas.push(f);
   });
 
   const totalPendiente = Object.values(porCliente).reduce((s, c) => s + Math.max(c.saldoPendiente, 0), 0);
-  const totalCobrable = aging.porVencer.monto + aging.vencidas_0_30.monto +
-                        aging.vencidas_31_60.monto + aging.vencidas_61_90.monto +
-                        aging.vencidas_91_180.monto;
-  const totalCritico = aging.vencidas_critica.monto;
-  const totalVencido = aging.vencidas_0_30.monto + aging.vencidas_31_60.monto +
-                       aging.vencidas_61_90.monto + aging.vencidas_91_180.monto +
-                       aging.vencidas_critica.monto;
+  const totalCobrable  = aging.porVencer.monto + aging.vencidas_0_30.monto +
+                         aging.vencidas_31_60.monto + aging.vencidas_61_90.monto + aging.vencidas_91_180.monto;
+  const totalCritico   = aging.vencidas_critica.monto;
+  const totalVencido   = aging.vencidas_0_30.monto + aging.vencidas_31_60.monto +
+                         aging.vencidas_61_90.monto + aging.vencidas_91_180.monto + aging.vencidas_critica.monto;
 
   const clientesArray = Object.values(porCliente)
     .filter(c => Math.abs(c.saldoPendiente) > 0.01)
@@ -380,40 +319,25 @@ export function computeCobranzas(procesado, todayRef = null) {
 
   let dsoGlobalSum = 0, dsoGlobalWeight = 0;
   clientesArray.forEach(c => {
-    if (c.dsoReal != null && c.saldoPendiente > 0) {
-      dsoGlobalSum += c.dsoReal * c.saldoPendiente;
-      dsoGlobalWeight += c.saldoPendiente;
-    }
+    if (c.dsoReal != null && c.saldoPendiente > 0) { dsoGlobalSum += c.dsoReal * c.saldoPendiente; dsoGlobalWeight += c.saldoPendiente; }
   });
   const dsoGlobal = dsoGlobalWeight > 0 ? dsoGlobalSum / dsoGlobalWeight : null;
 
   const totalPorCuenta = { nacional: 0, internacional: 0 };
-  clientesArray.forEach(c => {
-    if (c.esInternacional) totalPorCuenta.internacional += c.saldoPendiente;
-    else totalPorCuenta.nacional += c.saldoPendiente;
-  });
+  clientesArray.forEach(c => { if (c.esInternacional) totalPorCuenta.internacional += c.saldoPendiente; else totalPorCuenta.nacional += c.saldoPendiente; });
 
   return {
-    porCliente,
-    clientesArray,
-    aging,
-    totalPendiente,
-    totalCobrable,
-    totalCritico,
-    totalVencido,
-    totalPorCuenta,
-    dsoGlobal,
-    totalFacturasPendientes: todasFacturasPendientes.length,
-    fechaInforme: today,
-    totalMovimientos: procesado.totalMovimientos,
+    porCliente, clientesArray, aging,
+    totalPendiente, totalCobrable, totalCritico, totalVencido, totalPorCuenta,
+    dsoGlobal, totalFacturasPendientes: todasFacturas.length,
+    fechaInforme: today, totalMovimientos: procesado.totalMovimientos,
     archivos: procesado.archivos || [],
   };
 }
 
 export function estimarVencimiento(fechaFactura, nombreCliente) {
   if (!fechaFactura) return null;
-  const dias = CLIENTE_PAGO_DIAS[normName(nombreCliente)] ||
-               CLIENTE_PAGO_DIAS[nombreCliente] ||
+  const dias = CLIENTE_PAGO_DIAS[normName(nombreCliente)] || CLIENTE_PAGO_DIAS[nombreCliente] ||
                (normName(nombreCliente).includes("MAXAM") ? 60 : 30);
   const v = new Date(fechaFactura);
   v.setDate(v.getDate() + dias);
@@ -425,39 +349,23 @@ export function buildCobranzaProyectada(cobranzas, today) {
   const ref = today || todayMidnight();
   const buckets = [];
   for (let w = 0; w < 13; w++) {
-    const inicio = new Date(ref);
-    inicio.setDate(inicio.getDate() + w * 7);
-    inicio.setHours(0, 0, 0, 0);
-    const fin = new Date(inicio);
-    fin.setDate(fin.getDate() + 6);
-    fin.setHours(23, 59, 59, 999);
+    const inicio = new Date(ref); inicio.setDate(inicio.getDate() + w * 7); inicio.setHours(0,0,0,0);
+    const fin = new Date(inicio); fin.setDate(fin.getDate() + 6); fin.setHours(23,59,59,999);
     buckets.push({ semana: w, inicio, fin, facturas: [], monto: 0, label: `${inicio.getDate()}/${inicio.getMonth()+1} — ${fin.getDate()}/${fin.getMonth()+1}` });
   }
   Object.values(cobranzas.porCliente || {}).forEach(c => {
     c.facturasPendientes.forEach(f => {
-      if (f.critica) return;
-      const venc = f.vencimiento;
-      if (!venc) return;
+      if (f.critica || !f.vencimiento) return;
       for (const b of buckets) {
-        if (venc >= b.inicio && venc <= b.fin) {
-          b.facturas.push({ ...f, cliente: c.nombre });
-          b.monto += f.monto;
-          break;
-        }
+        if (f.vencimiento >= b.inicio && f.vencimiento <= b.fin) { b.facturas.push({ ...f, cliente: c.nombre }); b.monto += f.monto; break; }
       }
     });
   });
-  const vencidas = { monto: 0, facturas: [] };
-  const criticas = { monto: 0, facturas: [] };
+  const vencidas = { monto: 0, facturas: [] }, criticas = { monto: 0, facturas: [] };
   Object.values(cobranzas.porCliente || {}).forEach(c => {
     c.facturasPendientes.forEach(f => {
-      if (f.critica) {
-        criticas.monto += f.monto;
-        criticas.facturas.push({ ...f, cliente: c.nombre });
-      } else if (f.vencimiento && f.vencimiento < ref) {
-        vencidas.monto += f.monto;
-        vencidas.facturas.push({ ...f, cliente: c.nombre });
-      }
+      if (f.critica) { criticas.monto += f.monto; criticas.facturas.push({ ...f, cliente: c.nombre }); }
+      else if (f.vencimiento && f.vencimiento < ref) { vencidas.monto += f.monto; vencidas.facturas.push({ ...f, cliente: c.nombre }); }
     });
   });
   return { buckets, vencidas, criticas };
