@@ -1,22 +1,15 @@
 // src/utils/clientesMaestro.js
 //
-// Motor de cálculos puros para el tab "Clientes 360".
-//
-// v1.3.3: DSO por folio (columna N "Número Doc."). Reemplaza el FIFO
-// anterior que agrupaba por cliente en vez de por factura individual.
+// v1.4.0: fix matching INGRESO por numeroDocPago (mismo fix que fileProcessor v1.4.0)
 
 import {
   fmtM, fmtFull, daysBetween, todayMidnight,
 } from './helpers_v2.js';
 
-export const CLIENTES_MAESTRO_VERSION = "1.3.3";
+export const CLIENTES_MAESTRO_VERSION = "1.4.0";
 if (typeof window !== "undefined") {
   console.log("[mi-centro] clientesMaestro v" + CLIENTES_MAESTRO_VERSION + " cargado");
 }
-
-// ──────────────────────────────────────────────────────────────────────
-// Umbrales de clasificación
-// ──────────────────────────────────────────────────────────────────────
 
 export const UMBRAL_FUGA_DELTA_PCT = -40;
 export const UMBRAL_FUGA_DIAS_SIN_VENTA = 60;
@@ -45,11 +38,8 @@ const mean = arr => (arr.length ? sum(arr) / arr.length : 0);
 const safeDiv = (a, b) => (b > 0 ? a / b : 0);
 
 // ──────────────────────────────────────────────────────────────────────
-// DSO real vía matching exacto por folio (columna N "Número Doc.")
-// v1.3.3: fix crítico. El FIFO anterior daba números artificialmente bajos
-// porque agrupaba por cliente en vez de por folio individual.
+// Normaliza folio
 // ──────────────────────────────────────────────────────────────────────
-
 function normFolio(v) {
   if (v == null || v === '') return '';
   const s = String(v).trim();
@@ -57,12 +47,24 @@ function normFolio(v) {
   return s;
 }
 
+// FIX v1.4.0: INGRESO rows deben agruparse por la factura que pagan
+// (col O = numeroDocPago), no por su propio número (col N = numeroDoc)
+function getFolioKey(r) {
+  if (r.tipo === 'INGRESO') {
+    const byPago = normFolio(r.numeroDocPago);
+    if (byPago) return byPago;
+  }
+  return normFolio(r.numeroDoc);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// DSO real vía matching exacto por folio
+// ──────────────────────────────────────────────────────────────────────
 function computeDsoFifo(filas) {
-  // Agrupar filas por folio (numeroDoc)
   const porFolio = new Map();
   for (const r of filas) {
     if (!r || !(r.fecha instanceof Date) || isNaN(r.fecha)) continue;
-    const folio = normFolio(r.numeroDoc);
+    const folio = getFolioKey(r);  // FIX: usar getFolioKey en vez de normFolio(r.numeroDoc)
     if (!folio) continue;
     if (!porFolio.has(folio)) porFolio.set(folio, []);
     porFolio.get(folio).push(r);
@@ -74,7 +76,6 @@ function computeDsoFifo(filas) {
   const samples = [];
 
   porFolio.forEach((rows, folio) => {
-    // Facturas reales (Vta_*) vs reversiones (INGRESO con cargo)
     const facturas = rows
       .filter(r => r.cargo > 0 && r.tipo !== 'INGRESO')
       .sort((a, b) => a.fecha - b.fecha);
@@ -82,7 +83,7 @@ function computeDsoFifo(filas) {
 
     const primerCargo = facturas[0];
     if (primerCargo.tipo === 'APERTURA') return;
-    if (primerCargo.fecha < cutoff) return; // muestra fuera de ventana
+    if (primerCargo.fecha < cutoff) return;
 
     const abonos = rows
       .filter(r => r.abono > 0)
@@ -96,7 +97,6 @@ function computeDsoFifo(filas) {
     const totalFacturas = facturas.reduce((s, r) => s + r.cargo, 0);
     const totalAbonos = abonos.reduce((s, r) => s + r.abono, 0) - reversiones;
 
-    // Folio saldado completo → DSO basado en último abono
     if (totalFacturas - totalAbonos > 0.01) return;
 
     const ultimoAbono = abonos[abonos.length - 1];
@@ -132,7 +132,6 @@ function computeDsoFifo(filas) {
 // ──────────────────────────────────────────────────────────────────────
 // Clasificador de estado
 // ──────────────────────────────────────────────────────────────────────
-
 function clasificarCliente(c, totalFacturacion3m) {
   const alertas = [];
   let estado = 'activo';
@@ -143,9 +142,6 @@ function clasificarCliente(c, totalFacturacion3m) {
   const senalDso = c.dsoProm != null ? c.dsoProm : c.diasVencidoPromedio;
   const tieneSenalDso = c.dsoProm != null || c.saldoCobrable > 0;
 
-  // Nuevo: primera factura hace <90 días. Solo válido si el histórico
-  // realmente cubre más que eso. Si el histórico es más corto que 90 días,
-  // no podemos concluir "nuevo" con certeza → dejamos activo.
   const tieneHistoricoSuficiente = c.historicoCubreDias >= UMBRAL_NUEVO_DIAS;
 
   if (tieneHistoricoSuficiente &&
@@ -192,18 +188,15 @@ function clasificarCliente(c, totalFacturacion3m) {
 // ──────────────────────────────────────────────────────────────────────
 // Main
 // ──────────────────────────────────────────────────────────────────────
-
 export function buildClientesMaestro({ rawRows, historicoRows, cobranzas, viajes, hoy }) {
   const HOY = hoy instanceof Date ? hoy : new Date();
   const meses12m = build12MonthsEnding(HOY);
   const meses3m = meses12m.slice(-3);
   const meses3mAnterior = meses12m.slice(-6, -3);
 
-  // Usamos historicoRows si existe, sino rawRows (saldos actuales como fallback)
   const fuenteClasificacion = (historicoRows && historicoRows.length > 0) ? historicoRows : (rawRows || []);
   const usandoHistoricoLargo = historicoRows && historicoRows.length > 0;
 
-  // Calcular la cobertura temporal real del archivo de clasificación
   let historicoFechaMin = null, historicoFechaMax = null;
   for (const r of fuenteClasificacion) {
     if (r.fecha instanceof Date && !isNaN(r.fecha)) {
@@ -213,7 +206,6 @@ export function buildClientesMaestro({ rawRows, historicoRows, cobranzas, viajes
   }
   const historicoCubreDias = historicoFechaMin ? daysBetween(historicoFechaMin, HOY) : 0;
 
-  // Agrupar filas HISTÓRICAS (clasificación) por cliente
   const porClienteHist = new Map();
   for (const r of fuenteClasificacion) {
     const nombre = r?.cliente || r?.ficha;
@@ -222,8 +214,6 @@ export function buildClientesMaestro({ rawRows, historicoRows, cobranzas, viajes
     porClienteHist.get(nombre).push(r);
   }
 
-  // Cobranzas.porCliente está indexado por normName(nombre); construimos
-  // un mapa nombre → entry para poder cruzar.
   const cobPorNombre = {};
   if (cobranzas && cobranzas.porCliente) {
     for (const c of Object.values(cobranzas.porCliente)) {
@@ -231,7 +221,6 @@ export function buildClientesMaestro({ rawRows, historicoRows, cobranzas, viajes
     }
   }
 
-  // Todos los clientes: unión entre clientes del histórico + clientes con saldo
   const todosClientes = new Set();
   for (const nombre of porClienteHist.keys()) todosClientes.add(nombre);
   for (const nombre of Object.keys(cobPorNombre)) todosClientes.add(nombre);
@@ -246,7 +235,6 @@ export function buildClientesMaestro({ rawRows, historicoRows, cobranzas, viajes
       .filter(r => (r.tipo === 'Vta_FVAELECT' || r.tipo === 'Vta_FVEELECTINT') && r.cargo > 0)
       .sort((a, b) => a.fecha - b.fecha);
 
-    // Facturación mensual 12m
     const mapMensual = new Map();
     for (const m of meses12m) mapMensual.set(m, 0);
     for (const f of facturas) {
@@ -278,7 +266,6 @@ export function buildClientesMaestro({ rawRows, historicoRows, cobranzas, viajes
 
     const mesesConFacturacion12m = montos12m.filter(m => m > 0).length;
 
-    // Saldos vienen del archivo ACTUAL (cobranzas), no del histórico
     const cob = cobPorNombre[nombre] || {};
     const saldoTotal = cob.saldoPendiente || 0;
     const saldoCobrable = cob.montoCobrables || 0;
@@ -293,7 +280,6 @@ export function buildClientesMaestro({ rawRows, historicoRows, cobranzas, viajes
       ? sum(facturasCobrables.map(f => (f.diasAtraso || 0) * f.monto)) / totalCobrableMonto
       : 0;
 
-    // DSO: primero prueba matcheo por folio (desde cobranzas); fallback a FIFO sobre histórico
     const dsoFifo = computeDsoFifo(filas);
     const dsoPromFinal = cob.dsoReal != null ? cob.dsoReal : dsoFifo.dsoProm;
     const nPagosFinal = cob.dsoMuestras || dsoFifo.nFacturasPagadas;
@@ -329,7 +315,7 @@ export function buildClientesMaestro({ rawRows, historicoRows, cobranzas, viajes
       primeraFactura,
       diasDesdeUltimaVenta,
       primeraFacturaDiasAtras,
-      historicoCubreDias, // para que clasificador sepa si confiar en "nuevo"
+      historicoCubreDias,
 
       saldoTotal,
       saldoCobrable,
@@ -404,10 +390,6 @@ export function buildClientesMaestro({ rawRows, historicoRows, cobranzas, viajes
     },
   };
 }
-
-// ──────────────────────────────────────────────────────────────────────
-// Metadatos de estado para UI
-// ──────────────────────────────────────────────────────────────────────
 
 export const ESTADO_META = {
   rentable: { label: 'Rentable', color: '#059669', bg: 'rgba(5, 150, 105, 0.12)', desc: 'Activo con DSO saludable (≤45 días). Es el perfil ideal.' },
